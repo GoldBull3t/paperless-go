@@ -2,6 +2,7 @@ package queue
 
 import (
 	"log"
+	"strconv"
 	"sync"
 	"time"
 
@@ -31,6 +32,9 @@ type Queue struct {
 }
 
 func NewQueue(db *database.DB, workerCount int) *Queue {
+	// Clean up any previously interrupted tasks
+	_, _ = db.Exec("UPDATE tasks SET status = 'FAILURE', result = 'Interrupted by server restart', date_done = CURRENT_TIMESTAMP WHERE status IN ('PENDING', 'STARTED')")
+
 	q := &Queue{
 		db:       db,
 		taskChan: make(chan TaskPayload, 100),
@@ -116,19 +120,39 @@ func (q *Queue) processTask(p TaskPayload) {
 	if err != nil {
 		log.Printf("[Queue] Task %s failed: %v", p.TaskID, err)
 		errMsg := err.Error()
-		_, _ = q.db.Exec(`
-			UPDATE tasks SET status = 'FAILURE', result = ?, date_done = CURRENT_TIMESTAMP WHERE task_id = ?
-		`, errMsg, p.TaskID)
-		if q.broadcaster != nil {
-			q.broadcaster.BroadcastTaskUpdate(models.Task{
-				TaskID:       p.TaskID,
-				Type:         "file_handling",
-				Status:       "FAILURE",
-				TaskName:     p.TaskName,
-				TaskFileName: p.TaskFileName,
-				DateDone:     &now,
-				Result:       &errMsg,
-			})
+		if docID > 0 {
+			docIDStr := strconv.Itoa(docID)
+			_, _ = q.db.Exec(`
+				UPDATE tasks SET status = 'FAILURE', result = ?, date_done = CURRENT_TIMESTAMP, related_document_id = ? WHERE task_id = ?
+			`, errMsg, docID, p.TaskID)
+			if q.broadcaster != nil {
+				q.broadcaster.BroadcastTaskUpdate(models.Task{
+					TaskID:             p.TaskID,
+					Type:               "file_handling",
+					Status:             "FAILURE",
+					TaskName:           p.TaskName,
+					TaskFileName:       p.TaskFileName,
+					DateDone:           &now,
+					Result:             &errMsg,
+					RelatedDocument:    &docIDStr,
+					RelatedDocumentIDs: []int{docID},
+				})
+			}
+		} else {
+			_, _ = q.db.Exec(`
+				UPDATE tasks SET status = 'FAILURE', result = ?, date_done = CURRENT_TIMESTAMP WHERE task_id = ?
+			`, errMsg, p.TaskID)
+			if q.broadcaster != nil {
+				q.broadcaster.BroadcastTaskUpdate(models.Task{
+					TaskID:       p.TaskID,
+					Type:         "file_handling",
+					Status:       "FAILURE",
+					TaskName:     p.TaskName,
+					TaskFileName: p.TaskFileName,
+					DateDone:     &now,
+					Result:       &errMsg,
+				})
+			}
 		}
 	} else {
 		log.Printf("[Queue] Task %s completed successfully. Document ID: %d", p.TaskID, docID)
@@ -137,15 +161,19 @@ func (q *Queue) processTask(p TaskPayload) {
 			UPDATE tasks SET status = 'SUCCESS', result = ?, date_done = CURRENT_TIMESTAMP, related_document_id = ? WHERE task_id = ?
 		`, resMsg, docID, p.TaskID)
 		if q.broadcaster != nil {
+			docIDStr := strconv.Itoa(docID)
 			q.broadcaster.BroadcastTaskUpdate(models.Task{
-				TaskID:          p.TaskID,
-				Type:            "file_handling",
-				Status:          "SUCCESS",
-				TaskName:        p.TaskName,
-				TaskFileName:    p.TaskFileName,
-				DateDone:        &now,
-				Result:          &resMsg,
-				RelatedDocument: &docID,
+				TaskID:               p.TaskID,
+				Type:                 "file_handling",
+				Status:               "SUCCESS",
+				TaskName:             p.TaskName,
+				TaskFileName:         p.TaskFileName,
+				DateDone:             &now,
+				Result:               &resMsg,
+				RelatedDocument:      &docIDStr,
+				RelatedDocumentIDs:   []int{docID},
+				TriggerSource:        "Consumption Directory",
+				TriggerSourceDisplay: "Auto",
 			})
 		}
 	}

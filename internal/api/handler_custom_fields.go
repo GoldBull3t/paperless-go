@@ -41,6 +41,10 @@ func (h *CustomFieldsHandler) List(w http.ResponseWriter, r *http.Request) {
 			allIDs = append(allIDs, cf.ID)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	if results == nil {
 		results = []models.CustomField{}
@@ -102,6 +106,32 @@ func (h *CustomFieldsHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(cf)
+}
+
+func (h *CustomFieldsHandler) Update(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	var input struct {
+		Name      *string                 `json:"name"`
+		DataType  *string                 `json:"data_type"`
+		ExtraData *map[string]interface{} `json:"extra_data"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if input.Name != nil {
+		_, _ = h.db.Exec("UPDATE custom_fields SET name = ? WHERE id = ?", *input.Name, id)
+	}
+	if input.DataType != nil {
+		_, _ = h.db.Exec("UPDATE custom_fields SET data_type = ? WHERE id = ?", *input.DataType, id)
+	}
+	if input.ExtraData != nil {
+		extraJSON, _ := json.Marshal(*input.ExtraData)
+		_, _ = h.db.Exec("UPDATE custom_fields SET extra_data = ? WHERE id = ?", string(extraJSON), id)
+	}
+
+	h.Get(w, r)
 }
 
 func (h *CustomFieldsHandler) Delete(w http.ResponseWriter, r *http.Request) {

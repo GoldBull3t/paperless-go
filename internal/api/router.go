@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"paperless-go/internal/config"
 	"paperless-go/internal/consumer"
 	"paperless-go/internal/database"
+	"paperless-go/internal/models"
 	"paperless-go/internal/queue"
 )
 
@@ -49,7 +51,7 @@ func NewRouter(
 	authH := NewAuthHandler(db, authSvc)
 	uiSettingsH := NewUISettingsHandler(db)
 	configH := NewConfigHandler(db)
-	docsH := NewDocumentsHandler(db, cfg, consumer, q)
+	docsH := NewDocumentsHandler(db, cfg, consumer, q, wsHub)
 	tagsH := NewTagsHandler(db)
 	corrsH := NewCorrespondentsHandler(db)
 	docTypesH := NewDocumentTypesHandler(db)
@@ -59,106 +61,215 @@ func NewRouter(
 	tasksH := NewTasksHandler(db)
 	statsH := NewStatisticsHandler(db)
 	usersH := NewUsersHandler(db)
+	workflowsH := NewWorkflowsHandler(db)
+	searchH := NewSearchHandler(db)
+	bulkH := NewBulkObjectsHandler(db)
+	scanH := NewScanHandler(cfg, consumer, q)
+	shareLinksH := NewShareLinksHandler(db, cfg)
+	schemaH := NewSchemaHandler()
+
+	emptyPaginated := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(models.PaginatedResponse{
+			Count:   0,
+			All:     []int{},
+			Results: []interface{}{},
+		})
+	}
 
 	// API subrouter
 	apiRouter := func(r chi.Router) {
+		// Public auth endpoint
 		r.Post("/token/", authH.GetToken)
-		r.Get("/ui_settings/", uiSettingsH.Get)
-		r.Post("/ui_settings/", uiSettingsH.Post)
-		r.Get("/config/", configH.Get)
-		r.Patch("/config/", configH.Patch)
-		r.Get("/statistics/", statsH.Get)
-		r.Get("/status/", statsH.GetStatus)
 
-		// Documents
-		r.Route("/documents", func(r chi.Router) {
-			r.Get("/", docsH.List)
-			r.Post("/post_document/", docsH.PostDocument)
-			r.Post("/bulk_edit/", docsH.BulkEdit)
-			r.Get("/{id}/", docsH.Get)
-			r.Put("/{id}/", docsH.Update)
-			r.Patch("/{id}/", docsH.Update)
-			r.Delete("/{id}/", docsH.Delete)
-			r.Get("/{id}/preview/", docsH.Preview)
-			r.Get("/{id}/download/", docsH.Download)
-			r.Get("/{id}/thumb/", docsH.Thumb)
-			r.Get("/{id}/metadata/", docsH.Metadata)
-		})
+		// Authenticated API endpoints
+		r.Group(func(r chi.Router) {
+			r.Use(RequireAuth)
 
-		// Tags
-		r.Route("/tags", func(r chi.Router) {
-			r.Get("/", tagsH.List)
-			r.Post("/", tagsH.Create)
-			r.Get("/{id}/", tagsH.Get)
-			r.Put("/{id}/", tagsH.Update)
-			r.Patch("/{id}/", tagsH.Update)
-			r.Delete("/{id}/", tagsH.Delete)
-		})
+			r.Get("/profile/", authH.GetProfile)
+			r.Patch("/profile/", authH.UpdateProfile)
+			r.Post("/profile/generate_auth_token/", authH.GenerateAuthToken)
+			r.Post("/profile/disconnect_social_account/", authH.DisconnectSocialAccount)
+			r.Get("/profile/social_account_providers/", authH.GetSocialAccountProviders)
+			r.Get("/profile/totp/", authH.GetTotpSettings)
+			r.Post("/profile/totp/", authH.ActivateTotp)
+			r.Delete("/profile/totp/", authH.DeactivateTotp)
 
-		// Correspondents
-		r.Route("/correspondents", func(r chi.Router) {
-			r.Get("/", corrsH.List)
-			r.Post("/", corrsH.Create)
-			r.Get("/{id}/", corrsH.Get)
-			r.Put("/{id}/", corrsH.Update)
-			r.Patch("/{id}/", corrsH.Update)
-			r.Delete("/{id}/", corrsH.Delete)
-		})
+			r.Get("/ui_settings/", uiSettingsH.Get)
+			r.Post("/ui_settings/", uiSettingsH.Post)
 
-		// Document Types
-		r.Route("/document_types", func(r chi.Router) {
-			r.Get("/", docTypesH.List)
-			r.Post("/", docTypesH.Create)
-			r.Get("/{id}/", docTypesH.Get)
-			r.Put("/{id}/", docTypesH.Update)
-			r.Patch("/{id}/", docTypesH.Update)
-			r.Delete("/{id}/", docTypesH.Delete)
-		})
+			// Config
+			r.Route("/config", func(r chi.Router) {
+				r.Get("/", configH.Get)
+				r.Patch("/", configH.Patch)
+				r.Patch("/{id}/", configH.Patch)
+			})
+			r.Get("/remote_version/", configH.GetRemoteVersion)
+			r.Get("/statistics/", statsH.Get)
+			r.Get("/status/", statsH.GetStatus)
 
-		// Storage Paths
-		r.Route("/storage_paths", func(r chi.Router) {
-			r.Get("/", storPathsH.List)
-			r.Post("/", storPathsH.Create)
-			r.Get("/{id}/", storPathsH.Get)
-			r.Put("/{id}/", storPathsH.Update)
-			r.Patch("/{id}/", storPathsH.Update)
-			r.Delete("/{id}/", storPathsH.Delete)
-		})
+			// Search
+			r.Get("/search/", searchH.Search)
+			r.Get("/search/autocomplete/", searchH.Autocomplete)
 
-		// Custom Fields
-		r.Route("/custom_fields", func(r chi.Router) {
-			r.Get("/", customFieldsH.List)
-			r.Post("/", customFieldsH.Create)
-			r.Get("/{id}/", customFieldsH.Get)
-			r.Delete("/{id}/", customFieldsH.Delete)
-		})
+			// Bulk edit generic objects (tags, correspondents, document types, etc.)
+			r.Post("/bulk_edit_objects/", bulkH.BulkEditObjects)
 
-		// Saved Views
-		r.Route("/saved_views", func(r chi.Router) {
-			r.Get("/", savedViewsH.List)
-			r.Post("/", savedViewsH.Create)
-			r.Get("/{id}/", savedViewsH.Get)
-			r.Delete("/{id}/", savedViewsH.Delete)
-		})
+			// Documents
+			r.Route("/documents", func(r chi.Router) {
+				r.Get("/", docsH.List)
+				r.Post("/post_document/", docsH.PostDocument)
+				r.Post("/bulk_edit/", docsH.BulkEdit)
+				r.Post("/selection_data/", docsH.SelectionData)
+				r.Get("/next_asn/", docsH.NextASN)
+				r.Get("/check_duplicate/", docsH.CheckDuplicate)
+				r.Post("/delete/", docsH.DeleteDocuments)
+				r.Post("/reprocess/", docsH.ReprocessDocuments)
+				r.Post("/bulk_download/", docsH.BulkDownload)
+				r.Post("/chat/", docsH.Chat)
+				r.Get("/{id}/", docsH.Get)
+				r.Put("/{id}/", docsH.Update)
+				r.Patch("/{id}/", docsH.Update)
+				r.Delete("/{id}/", docsH.Delete)
+				r.Get("/{id}/preview/", docsH.Preview)
+				r.Get("/{id}/download/", docsH.Download)
+				r.Get("/{id}/thumb/", docsH.Thumb)
+				r.Get("/{id}/metadata/", docsH.Metadata)
+				r.Get("/{id}/suggestions/", docsH.Suggestions)
+				r.Get("/{id}/ai_suggestions/", docsH.AISuggestions)
+				r.Get("/{id}/history/", docsH.History)
+				r.Get("/{id}/share_links/", shareLinksH.GetForDocument)
+				r.Get("/{id}/notes/", docsH.GetNotes)
+				r.Post("/{id}/notes/", docsH.CreateNote)
+				r.Delete("/{id}/notes/", docsH.DeleteNote)
+				r.Delete("/{id}/notes/{note_id}/", docsH.DeleteNote)
+			})
 
-		// Tasks
-		r.Route("/tasks", func(r chi.Router) {
-			r.Get("/", tasksH.List)
-			r.Post("/acknowledge/", tasksH.Acknowledge)
-		})
+			// Trash
+			r.Route("/trash", func(r chi.Router) {
+				r.Get("/", docsH.TrashList)
+				r.Post("/", docsH.TrashAction)
+				r.Post("/restore/", docsH.TrashAction)
+				r.Post("/purge/", docsH.TrashAction)
+			})
 
-		// Users, Groups, Workflows, Logs
-		r.Route("/users", func(r chi.Router) {
-			r.Get("/", usersH.List)
-		})
-		r.Route("/groups", func(r chi.Router) {
-			r.Get("/", usersH.ListGroups)
-		})
-		r.Route("/workflows", func(r chi.Router) {
-			r.Get("/", usersH.ListWorkflows)
-		})
-		r.Route("/logs", func(r chi.Router) {
-			r.Get("/", usersH.ListLogs)
+			// Tags
+			r.Route("/tags", func(r chi.Router) {
+				r.Get("/", tagsH.List)
+				r.Post("/", tagsH.Create)
+				r.Get("/{id}/", tagsH.Get)
+				r.Put("/{id}/", tagsH.Update)
+				r.Patch("/{id}/", tagsH.Update)
+				r.Delete("/{id}/", tagsH.Delete)
+			})
+
+			// Correspondents
+			r.Route("/correspondents", func(r chi.Router) {
+				r.Get("/", corrsH.List)
+				r.Post("/", corrsH.Create)
+				r.Get("/{id}/", corrsH.Get)
+				r.Put("/{id}/", corrsH.Update)
+				r.Patch("/{id}/", corrsH.Update)
+				r.Delete("/{id}/", corrsH.Delete)
+			})
+
+			// Document Types
+			r.Route("/document_types", func(r chi.Router) {
+				r.Get("/", docTypesH.List)
+				r.Post("/", docTypesH.Create)
+				r.Get("/{id}/", docTypesH.Get)
+				r.Put("/{id}/", docTypesH.Update)
+				r.Patch("/{id}/", docTypesH.Update)
+				r.Delete("/{id}/", docTypesH.Delete)
+			})
+
+			// Storage Paths
+			r.Route("/storage_paths", func(r chi.Router) {
+				r.Get("/", storPathsH.List)
+				r.Post("/", storPathsH.Create)
+				r.Get("/{id}/", storPathsH.Get)
+				r.Put("/{id}/", storPathsH.Update)
+				r.Patch("/{id}/", storPathsH.Update)
+				r.Delete("/{id}/", storPathsH.Delete)
+			})
+
+			// Custom Fields
+			r.Route("/custom_fields", func(r chi.Router) {
+				r.Get("/", customFieldsH.List)
+				r.Post("/", customFieldsH.Create)
+				r.Get("/{id}/", customFieldsH.Get)
+				r.Put("/{id}/", customFieldsH.Update)
+				r.Patch("/{id}/", customFieldsH.Update)
+				r.Delete("/{id}/", customFieldsH.Delete)
+			})
+
+			// Saved Views
+			r.Route("/saved_views", func(r chi.Router) {
+				r.Get("/", savedViewsH.List)
+				r.Post("/", savedViewsH.Create)
+				r.Get("/{id}/", savedViewsH.Get)
+				r.Put("/{id}/", savedViewsH.Update)
+				r.Patch("/{id}/", savedViewsH.Update)
+				r.Delete("/{id}/", savedViewsH.Delete)
+			})
+
+			// Tasks
+			r.Route("/tasks", func(r chi.Router) {
+				r.Get("/", tasksH.List)
+				r.Get("/status_counts/", tasksH.StatusCounts)
+				r.Post("/acknowledge/", tasksH.Acknowledge)
+			})
+
+			// Users, Groups, Workflows, Mail, ShareLinks, Logs, Scan
+			r.Route("/users", func(r chi.Router) {
+				r.Get("/", usersH.List)
+				r.Post("/{id}/deactivate_totp/", usersH.DeactivateUserTotp)
+			})
+			r.Route("/groups", func(r chi.Router) {
+				r.Get("/", usersH.ListGroups)
+			})
+			r.Route("/workflows", func(r chi.Router) {
+				r.Get("/", workflowsH.List)
+				r.Post("/", workflowsH.Create)
+				r.Get("/{id}/", workflowsH.Get)
+				r.Put("/{id}/", workflowsH.Update)
+				r.Patch("/{id}/", workflowsH.Update)
+				r.Delete("/{id}/", workflowsH.Delete)
+			})
+			r.Route("/workflow_triggers", func(r chi.Router) {
+				r.Get("/", emptyPaginated)
+			})
+			r.Route("/workflow_actions", func(r chi.Router) {
+				r.Get("/", emptyPaginated)
+			})
+			r.Route("/mail_accounts", func(r chi.Router) {
+				r.Get("/", emptyPaginated)
+			})
+			r.Route("/mail_rules", func(r chi.Router) {
+				r.Get("/", emptyPaginated)
+			})
+			r.Route("/share_links", func(r chi.Router) {
+				r.Get("/", shareLinksH.List)
+				r.Post("/", shareLinksH.Create)
+				r.Get("/{id}/", shareLinksH.Get)
+				r.Delete("/{id}/", shareLinksH.Delete)
+			})
+			r.Route("/logs", func(r chi.Router) {
+				r.Get("/", usersH.ListLogs)
+				r.Get("/{log}/", usersH.GetLog)
+			})
+
+			// eSCL Network Scanning (Feature #19)
+			r.Route("/scan", func(r chi.Router) {
+				r.Get("/scanners/", scanH.GetScanners)
+				r.Post("/scanners/test/", scanH.TestScanner)
+				r.Post("/scan/", scanH.TriggerScan)
+			})
+
+			// OpenAPI Schema & Interactive Documentation (Swagger UI & ReDoc)
+			r.Get("/schema/", schemaH.GetSchema)
+			r.Get("/schema/swagger-ui/", schemaH.SwaggerUI)
+			r.Get("/schema/redoc/", schemaH.Redoc)
 		})
 	}
 
@@ -168,6 +279,16 @@ func NewRouter(
 	// Mount API also under /{lang}/api/ for Angular base href compatibility
 	r.Route("/{lang:[a-z]{2}-[A-Z]{2}}/api", apiRouter)
 
+	// Network Scanner Web Portal (UI Feature)
+	r.Get("/scan", scanH.ScanPage)
+	r.Get("/scan/", scanH.ScanPage)
+	r.Get("/{lang:[a-z]{2}-[A-Z]{2}}/scan", scanH.ScanPage)
+	r.Get("/{lang:[a-z]{2}-[A-Z]{2}}/scan/", scanH.ScanPage)
+
+	// Public share links (Feature #3)
+	r.Get("/share/{slug}", shareLinksH.PublicAccess)
+	r.Get("/{lang:[a-z]{2}-[A-Z]{2}}/share/{slug}", shareLinksH.PublicAccess)
+
 	// WebSocket routes
 	r.HandleFunc("/ws/status/", wsHub.HandleWS)
 	r.HandleFunc("/ws/", wsHub.HandleWS)
@@ -175,9 +296,7 @@ func NewRouter(
 	r.HandleFunc("/{lang:[a-z]{2}-[A-Z]{2}}/ws/", wsHub.HandleWS)
 
 	// Authentication forms / redirects
-	r.HandleFunc("/accounts/login/", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/", http.StatusFound)
-	})
+	r.HandleFunc("/accounts/login/", authH.LoginPage)
 	r.HandleFunc("/accounts/logout/", authH.Logout)
 
 	// Static assets (/static/*)
@@ -206,6 +325,13 @@ func NewRouter(
 			}
 		}
 
+		// If unauthenticated user requests the app shell (index.html), redirect to login page (matches Django LoginRequiredMixin)
+		user := GetUserFromContext(r.Context())
+		if user == nil {
+			http.Redirect(w, r, "/accounts/login/?next="+r.URL.RequestURI(), http.StatusFound)
+			return
+		}
+
 		// Otherwise serve index.html for Angular pushState routing
 		indexPath := filepath.Join(langPath, "index.html")
 		http.ServeFile(w, r, indexPath)
@@ -220,6 +346,12 @@ func NewRouter(
 
 	// Root redirect: detect language preference and redirect to /{lang}/
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		user := GetUserFromContext(r.Context())
+		if user == nil {
+			http.Redirect(w, r, "/accounts/login/?next=/", http.StatusFound)
+			return
+		}
+
 		targetLang := cfg.DefaultLanguage
 		if cookie, err := r.Cookie("django_language"); err == nil && cookie.Value != "" {
 			targetLang = cookie.Value
@@ -236,6 +368,88 @@ func NewRouter(
 		}
 
 		http.Redirect(w, r, fmt.Sprintf("/%s/", targetLang), http.StatusFound)
+	})
+
+	// Custom 404 Not Found handler: returns JSON for API, styled responsive page for browsers
+	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.Contains(r.Header.Get("Accept"), "application/json") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"detail": "Not found."}`))
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		html404 := `<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Page Not Found - Paperless-ngx</title>
+	<link rel="icon" type="image/x-icon" href="/static/paperless/img/favicon.ico">
+	<link rel="stylesheet" href="/static/bootstrap.min.css">
+	<style>
+		:root {
+			--bg-app: #f4f6f8;
+			--bg-card: #ffffff;
+			--text-main: #212529;
+			--text-muted: #6c757d;
+			--border-color: #dee2e6;
+			--primary-color: #17541f;
+			--primary-hover: #124018;
+		}
+		@media (prefers-color-scheme: dark) {
+			:root {
+				--bg-app: #121315;
+				--bg-card: #242529;
+				--text-main: #e2e8f0;
+				--text-muted: #94a3b8;
+				--border-color: #34373d;
+				--primary-color: #1f7a2d;
+				--primary-hover: #279939;
+			}
+		}
+		body {
+			background-color: var(--bg-app);
+			color: var(--text-main);
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			height: 100vh;
+			margin: 0;
+			font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+		}
+		.card-box {
+			background: var(--bg-card);
+			border: 1px solid var(--border-color);
+			border-radius: 12px;
+			padding: 2.75rem 2rem;
+			text-align: center;
+			max-width: 440px;
+			box-shadow: 0 10px 25px rgba(0,0,0,0.08);
+		}
+		.btn-primary {
+			background-color: var(--primary-color);
+			border-color: var(--primary-color);
+			font-weight: 500;
+		}
+		.btn-primary:hover {
+			background-color: var(--primary-hover);
+			border-color: var(--primary-hover);
+		}
+	</style>
+</head>
+<body>
+	<div class="card-box">
+		<h1 class="display-3 fw-bold text-muted mb-2">404</h1>
+		<h2 class="h4 mb-2">Page Not Found</h2>
+		<p class="text-muted small mb-4">The page or resource you requested could not be found on this Paperless instance.</p>
+		<a href="/" class="btn btn-primary px-4">&larr; Return to Dashboard</a>
+	</div>
+</body>
+</html>`
+		_, _ = w.Write([]byte(html404))
 	})
 
 	return r

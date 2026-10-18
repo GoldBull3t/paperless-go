@@ -19,6 +19,7 @@ type Config struct {
 	OCRWorkerCount  int
 	AutoTagging     bool
 	DefaultLanguage string
+	AutoLogin       bool
 }
 
 func Load() *Config {
@@ -26,6 +27,14 @@ func Load() *Config {
 	mediaDir := getEnv("PAPERLESS_MEDIA_DIR", "./media")
 	consumeDir := getEnv("PAPERLESS_CONSUME_DIR", "./consume")
 	staticDir := getEnv("PAPERLESS_STATIC_DIR", "./web/static")
+	if _, err := os.Stat(staticDir); err != nil {
+		if exe, err := os.Executable(); err == nil {
+			candidate := filepath.Join(filepath.Dir(exe), "web", "static")
+			if _, err := os.Stat(candidate); err == nil {
+				staticDir = candidate
+			}
+		}
+	}
 
 	// Ensure directories exist
 	_ = os.MkdirAll(dataDir, 0755)
@@ -42,6 +51,7 @@ func Load() *Config {
 	ocrMode := getEnv("PAPERLESS_OCR_MODE", "auto")
 	ocrWorkers := getEnvInt("PAPERLESS_OCR_WORKERS", 1)
 	defaultLang := getEnv("PAPERLESS_DEFAULT_LANGUAGE", "en-US")
+	autoLogin := getEnv("PAPERLESS_AUTO_LOGIN", "true") == "true"
 
 	return &Config{
 		Host:            host,
@@ -56,6 +66,7 @@ func Load() *Config {
 		OCRWorkerCount:  ocrWorkers,
 		AutoTagging:     getEnv("PAPERLESS_AUTO_TAGGING", "true") == "true",
 		DefaultLanguage: defaultLang,
+		AutoLogin:       autoLogin,
 	}
 }
 

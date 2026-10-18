@@ -1,6 +1,7 @@
 package api
 
 import (
+	"archive/zip"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -11,13 +12,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/go-chi/chi/v5"
+	"paperless-go/internal/compress"
 	"paperless-go/internal/config"
 	"paperless-go/internal/consumer"
 	"paperless-go/internal/database"
 	"paperless-go/internal/models"
 	"paperless-go/internal/queue"
+	"paperless-go/internal/workflow"
 )
 
 type DocumentsHandler struct {
@@ -25,10 +29,31 @@ type DocumentsHandler struct {
 	cfg      *config.Config
 	consumer *consumer.Consumer
 	queue    *queue.Queue
+	wsHub    *WebSocketHub
 }
 
-func NewDocumentsHandler(db *database.DB, cfg *config.Config, c *consumer.Consumer, q *queue.Queue) *DocumentsHandler {
-	return &DocumentsHandler{db: db, cfg: cfg, consumer: c, queue: q}
+func NewDocumentsHandler(db *database.DB, cfg *config.Config, c *consumer.Consumer, q *queue.Queue, ws *WebSocketHub) *DocumentsHandler {
+	return &DocumentsHandler{db: db, cfg: cfg, consumer: c, queue: q, wsHub: ws}
+}
+
+func sanitizeFTSQuery(q string) string {
+	var cleaned strings.Builder
+	for _, r := range q {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsSpace(r) {
+			cleaned.WriteRune(r)
+		} else {
+			cleaned.WriteRune(' ')
+		}
+	}
+	words := strings.Fields(cleaned.String())
+	if len(words) == 0 {
+		return ""
+	}
+	var terms []string
+	for _, w := range words {
+		terms = append(terms, w+"*")
+	}
+	return strings.Join(terms, " ")
 }
 
 func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -42,38 +67,181 @@ func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
 		pageSize = 25
 	}
 	offset := (page - 1) * pageSize
+	truncateContent := q.Get("truncate_content") == "true"
 
 	var conditions []string
 	var args []interface{}
 
-	// Full text search
-	searchQuery := q.Get("query")
-	if searchQuery != "" {
-		conditions = append(conditions, "d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?)")
-		args = append(args, searchQuery+"*")
+	// Exclude soft-deleted documents from regular list
+	conditions = append(conditions, "d.deleted_at IS NULL")
+
+	// Multi-user Object-level permissions (Feature 4)
+	user := GetUserFromContext(r.Context())
+	if user != nil && !user.IsSuperuser {
+		conditions = append(conditions, "(d.owner_id IS NULL OR d.owner_id = ?)")
+		args = append(args, user.ID)
 	}
 
-	// Correspondent filter
+	// Owner filters
+	if ownerStr := q.Get("owner__id"); ownerStr != "" {
+		if oid, err := strconv.Atoi(ownerStr); err == nil {
+			conditions = append(conditions, "d.owner_id = ?")
+			args = append(args, oid)
+		}
+	}
+	if ownerNull := q.Get("owner__isnull"); ownerNull != "" {
+		if ownerNull == "true" || ownerNull == "1" {
+			conditions = append(conditions, "d.owner_id IS NULL")
+		} else {
+			conditions = append(conditions, "d.owner_id IS NOT NULL")
+		}
+	}
+
+	// Full text search with query sanitization
+	searchQuery := q.Get("query")
+	if searchQuery != "" {
+		safeFTS := sanitizeFTSQuery(searchQuery)
+		if safeFTS != "" {
+			conditions = append(conditions, "d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?)")
+			args = append(args, safeFTS)
+		}
+	}
+
+	// Checksum filter for deduplication inspection
+	if cs := q.Get("checksum"); cs != "" {
+		conditions = append(conditions, "d.checksum = ?")
+		args = append(args, cs)
+	}
+
+	// Correspondent filters
 	if corrStr := q.Get("correspondent__id"); corrStr != "" {
 		if corrID, err := strconv.Atoi(corrStr); err == nil {
 			conditions = append(conditions, "d.correspondent_id = ?")
 			args = append(args, corrID)
 		}
 	}
+	if corrNull := q.Get("correspondent__isnull"); corrNull != "" {
+		if corrNull == "true" || corrNull == "1" {
+			conditions = append(conditions, "d.correspondent_id IS NULL")
+		} else {
+			conditions = append(conditions, "d.correspondent_id IS NOT NULL")
+		}
+	}
+	if corrIn := q.Get("correspondent__id__in"); corrIn != "" {
+		ids := strings.Split(corrIn, ",")
+		var placeholders []string
+		for _, idStr := range ids {
+			if id, err := strconv.Atoi(strings.TrimSpace(idStr)); err == nil {
+				placeholders = append(placeholders, "?")
+				args = append(args, id)
+			}
+		}
+		if len(placeholders) > 0 {
+			conditions = append(conditions, fmt.Sprintf("d.correspondent_id IN (%s)", strings.Join(placeholders, ",")))
+		}
+	}
+	if corrNone := q.Get("correspondent__id__none"); corrNone != "" {
+		ids := strings.Split(corrNone, ",")
+		var placeholders []string
+		for _, idStr := range ids {
+			if id, err := strconv.Atoi(strings.TrimSpace(idStr)); err == nil {
+				placeholders = append(placeholders, "?")
+				args = append(args, id)
+			}
+		}
+		if len(placeholders) > 0 {
+			conditions = append(conditions, fmt.Sprintf("(d.correspondent_id NOT IN (%s) OR d.correspondent_id IS NULL)", strings.Join(placeholders, ",")))
+		}
+	}
 
-	// Document type filter
+	// Document type filters
 	if typeStr := q.Get("document_type__id"); typeStr != "" {
 		if typeID, err := strconv.Atoi(typeStr); err == nil {
 			conditions = append(conditions, "d.document_type_id = ?")
 			args = append(args, typeID)
 		}
 	}
+	if typeNull := q.Get("document_type__isnull"); typeNull != "" {
+		if typeNull == "true" || typeNull == "1" {
+			conditions = append(conditions, "d.document_type_id IS NULL")
+		} else {
+			conditions = append(conditions, "d.document_type_id IS NOT NULL")
+		}
+	}
+	if typeIn := q.Get("document_type__id__in"); typeIn != "" {
+		ids := strings.Split(typeIn, ",")
+		var placeholders []string
+		for _, idStr := range ids {
+			if id, err := strconv.Atoi(strings.TrimSpace(idStr)); err == nil {
+				placeholders = append(placeholders, "?")
+				args = append(args, id)
+			}
+		}
+		if len(placeholders) > 0 {
+			conditions = append(conditions, fmt.Sprintf("d.document_type_id IN (%s)", strings.Join(placeholders, ",")))
+		}
+	}
+	if typeNone := q.Get("document_type__id__none"); typeNone != "" {
+		ids := strings.Split(typeNone, ",")
+		var placeholders []string
+		for _, idStr := range ids {
+			if id, err := strconv.Atoi(strings.TrimSpace(idStr)); err == nil {
+				placeholders = append(placeholders, "?")
+				args = append(args, id)
+			}
+		}
+		if len(placeholders) > 0 {
+			conditions = append(conditions, fmt.Sprintf("(d.document_type_id NOT IN (%s) OR d.document_type_id IS NULL)", strings.Join(placeholders, ",")))
+		}
+	}
 
-	// Storage path filter
+	// Storage path filters
 	if pathStr := q.Get("storage_path__id"); pathStr != "" {
 		if pathID, err := strconv.Atoi(pathStr); err == nil {
 			conditions = append(conditions, "d.storage_path_id = ?")
 			args = append(args, pathID)
+		}
+	}
+	if pathNull := q.Get("storage_path__isnull"); pathNull != "" {
+		if pathNull == "true" || pathNull == "1" {
+			conditions = append(conditions, "d.storage_path_id IS NULL")
+		} else {
+			conditions = append(conditions, "d.storage_path_id IS NOT NULL")
+		}
+	}
+	if pathIn := q.Get("storage_path__id__in"); pathIn != "" {
+		ids := strings.Split(pathIn, ",")
+		var placeholders []string
+		for _, idStr := range ids {
+			if id, err := strconv.Atoi(strings.TrimSpace(idStr)); err == nil {
+				placeholders = append(placeholders, "?")
+				args = append(args, id)
+			}
+		}
+		if len(placeholders) > 0 {
+			conditions = append(conditions, fmt.Sprintf("d.storage_path_id IN (%s)", strings.Join(placeholders, ",")))
+		}
+	}
+	if pathNone := q.Get("storage_path__id__none"); pathNone != "" {
+		ids := strings.Split(pathNone, ",")
+		var placeholders []string
+		for _, idStr := range ids {
+			if id, err := strconv.Atoi(strings.TrimSpace(idStr)); err == nil {
+				placeholders = append(placeholders, "?")
+				args = append(args, id)
+			}
+		}
+		if len(placeholders) > 0 {
+			conditions = append(conditions, fmt.Sprintf("(d.storage_path_id NOT IN (%s) OR d.storage_path_id IS NULL)", strings.Join(placeholders, ",")))
+		}
+	}
+
+	// Inbox tag filter (is_in_inbox)
+	if inInbox := q.Get("is_in_inbox"); inInbox != "" {
+		if inInbox == "true" || inInbox == "1" {
+			conditions = append(conditions, "EXISTS (SELECT 1 FROM document_tags dt JOIN tags t ON dt.tag_id = t.id WHERE dt.document_id = d.id AND t.is_inbox_tag = 1)")
+		} else if inInbox == "false" || inInbox == "0" {
+			conditions = append(conditions, "NOT EXISTS (SELECT 1 FROM document_tags dt JOIN tags t ON dt.tag_id = t.id WHERE dt.document_id = d.id AND t.is_inbox_tag = 1)")
 		}
 	}
 
@@ -88,6 +256,21 @@ func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Tag filters (tags__id__in)
+	if tagsIn := q.Get("tags__id__in"); tagsIn != "" {
+		tagIDs := strings.Split(tagsIn, ",")
+		var placeholders []string
+		for _, tidStr := range tagIDs {
+			if tid, err := strconv.Atoi(strings.TrimSpace(tidStr)); err == nil {
+				placeholders = append(placeholders, "?")
+				args = append(args, tid)
+			}
+		}
+		if len(placeholders) > 0 {
+			conditions = append(conditions, fmt.Sprintf("EXISTS (SELECT 1 FROM document_tags dt WHERE dt.document_id = d.id AND dt.tag_id IN (%s))", strings.Join(placeholders, ",")))
+		}
+	}
+
 	// Tag filters (tags__id__none)
 	if tagsNone := q.Get("tags__id__none"); tagsNone != "" {
 		tagIDs := strings.Split(tagsNone, ",")
@@ -96,6 +279,78 @@ func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
 				conditions = append(conditions, "NOT EXISTS (SELECT 1 FROM document_tags dt WHERE dt.document_id = d.id AND dt.tag_id = ?)")
 				args = append(args, tid)
 			}
+		}
+	}
+
+	// Tag presence (is_tagged)
+	if isTagged := q.Get("is_tagged"); isTagged != "" {
+		if isTagged == "true" || isTagged == "1" {
+			conditions = append(conditions, "EXISTS (SELECT 1 FROM document_tags dt WHERE dt.document_id = d.id)")
+		} else {
+			conditions = append(conditions, "NOT EXISTS (SELECT 1 FROM document_tags dt WHERE dt.document_id = d.id)")
+		}
+	}
+
+	// Date range filters (created)
+	if createdGte := q.Get("created__date__gte"); createdGte != "" {
+		conditions = append(conditions, "date(d.created) >= date(?)")
+		args = append(args, createdGte)
+	}
+	if createdLte := q.Get("created__date__lte"); createdLte != "" {
+		conditions = append(conditions, "date(d.created) <= date(?)")
+		args = append(args, createdLte)
+	}
+	if createdLt := q.Get("created__date__lt"); createdLt != "" {
+		conditions = append(conditions, "date(d.created) < date(?)")
+		args = append(args, createdLt)
+	}
+	if createdGt := q.Get("created__date__gt"); createdGt != "" {
+		conditions = append(conditions, "date(d.created) > date(?)")
+		args = append(args, createdGt)
+	}
+
+	// Date range filters (added)
+	if addedGte := q.Get("added__date__gte"); addedGte != "" {
+		conditions = append(conditions, "date(d.added) >= date(?)")
+		args = append(args, addedGte)
+	}
+	if addedLte := q.Get("added__date__lte"); addedLte != "" {
+		conditions = append(conditions, "date(d.added) <= date(?)")
+		args = append(args, addedLte)
+	}
+	if addedLt := q.Get("added__date__lt"); addedLt != "" {
+		conditions = append(conditions, "date(d.added) < date(?)")
+		args = append(args, addedLt)
+	}
+	if addedGt := q.Get("added__date__gt"); addedGt != "" {
+		conditions = append(conditions, "date(d.added) > date(?)")
+		args = append(args, addedGt)
+	}
+
+	// Title icontains filter
+	if titleContains := q.Get("title__icontains"); titleContains != "" {
+		conditions = append(conditions, "d.title LIKE ?")
+		args = append(args, "%"+titleContains+"%")
+	}
+
+	// Content icontains filter
+	if contentContains := q.Get("content__icontains"); contentContains != "" {
+		conditions = append(conditions, "d.content LIKE ?")
+		args = append(args, "%"+contentContains+"%")
+	}
+
+	// ASN filters
+	if asnStr := q.Get("archive_serial_number"); asnStr != "" {
+		if asnVal, err := strconv.Atoi(asnStr); err == nil {
+			conditions = append(conditions, "d.archive_serial_number = ?")
+			args = append(args, asnVal)
+		}
+	}
+	if asnNull := q.Get("archive_serial_number__isnull"); asnNull != "" {
+		if asnNull == "true" || asnNull == "1" {
+			conditions = append(conditions, "d.archive_serial_number IS NULL")
+		} else {
+			conditions = append(conditions, "d.archive_serial_number IS NOT NULL")
 		}
 	}
 
@@ -142,6 +397,7 @@ func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
 			allIDs = append(allIDs, id)
 		}
 	}
+	_ = rowsAll.Err()
 	if allIDs == nil {
 		allIDs = []int{}
 	}
@@ -151,7 +407,7 @@ func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
 	pageQuery := fmt.Sprintf(`
 		SELECT d.id, d.title, d.content, d.correspondent_id, d.document_type_id, d.storage_path_id,
 		       d.created, d.modified, d.added, d.archive_serial_number, d.original_filename, d.archive_filename,
-		       d.owner_id, d.page_count
+		       d.mime_type, d.owner_id, d.page_count
 		FROM documents d %s %s LIMIT ? OFFSET ?
 	`, whereClause, orderClause)
 
@@ -172,7 +428,7 @@ func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(
 			&doc.ID, &doc.Title, &doc.Content, &corr, &docType, &storPath,
 			&doc.Created, &doc.Modified, &doc.Added, &asn, &doc.OriginalFileName, &archFile,
-			&owner, &doc.PageCount,
+			&doc.MimeType, &owner, &doc.PageCount,
 		); err == nil {
 			if corr.Valid {
 				c := int(corr.Int64)
@@ -198,8 +454,22 @@ func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
 				doc.ArchivedFileName = &archFile.String
 			}
 
+			// Transparently decompress content if Zstandard compressed (Feature #2)
+			doc.Content = compress.DecompressText(doc.Content)
+
+			// If truncate_content is requested by Angular UI, don't dump entire OCR text
+			if truncateContent {
+				if len(doc.Content) > 100 {
+					doc.Content = doc.Content[:100] + "..."
+				}
+			}
+
 			doc.CreatedDate = doc.Created.Format("2006-01-02")
 			doc.UserCanChange = true
+			if user != nil && !user.IsSuperuser {
+				doc.UserCanChange = (doc.Owner == nil || *doc.Owner == user.ID)
+			}
+			doc.IsSharedByRequester = (user != nil && doc.Owner != nil && *doc.Owner == user.ID)
 			doc.Notes = []models.DocumentNote{}
 			doc.CustomFields = []models.DocumentCustomFieldValue{}
 			doc.Tags = []int{}
@@ -207,27 +477,85 @@ func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
 			results = append(results, doc)
 		}
 	}
+	_ = rows.Err()
 	rows.Close()
 
 	for i := range results {
 		results[i].Tags = h.getDocTags(results[i].ID)
+		results[i].CustomFields = h.getDocCustomFields(results[i].ID)
 	}
 
 	if results == nil {
 		results = []models.Document{}
 	}
 
+	var nextURL, prevURL *string
+	if offset+pageSize < totalCount {
+		u := fmt.Sprintf("?page=%d&page_size=%d", page+1, pageSize)
+		nextURL = &u
+	}
+	if page > 1 {
+		u := fmt.Sprintf("?page=%d&page_size=%d", page-1, pageSize)
+		prevURL = &u
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(models.PaginatedResponse{
-		Count:   totalCount,
-		All:     allIDs,
-		Results: results,
+		Count:    totalCount,
+		Next:     nextURL,
+		Previous: prevURL,
+		All:      allIDs,
+		Results:  results,
 	})
+}
+
+func (h *DocumentsHandler) checkDocumentAccess(r *http.Request, docID int) (bool, bool) {
+	var ownerID sql.NullInt64
+	err := h.db.QueryRow("SELECT owner_id FROM documents WHERE id = ?", docID).Scan(&ownerID)
+	if err != nil {
+		return false, false
+	}
+	user := GetUserFromContext(r.Context())
+	if user == nil || user.IsSuperuser {
+		return true, true
+	}
+	if !ownerID.Valid || int(ownerID.Int64) == user.ID {
+		return true, true
+	}
+	return true, false
+}
+
+func (h *DocumentsHandler) filterAllowedDocuments(docIDs []int, user *models.User) []int {
+	if user == nil || user.IsSuperuser {
+		return docIDs
+	}
+	var allowed []int
+	for _, id := range docIDs {
+		var ownerID sql.NullInt64
+		err := h.db.QueryRow("SELECT owner_id FROM documents WHERE id = ?", id).Scan(&ownerID)
+		if err == nil && (!ownerID.Valid || int(ownerID.Int64) == user.ID) {
+			allowed = append(allowed, id)
+		}
+	}
+	return allowed
 }
 
 func (h *DocumentsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
-	doc, err := h.fetchDocument(id)
+	exists, allowed := h.checkDocumentAccess(r, id)
+	if !exists {
+		http.NotFound(w, r)
+		return
+	}
+	if !allowed {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
+	user := GetUserFromContext(r.Context())
+	doc, err := h.fetchDocumentWithUser(id, user)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -239,18 +567,42 @@ func (h *DocumentsHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 func (h *DocumentsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
-	var input struct {
-		Title               *string    `json:"title"`
-		Correspondent       *int       `json:"correspondent"`
-		DocumentType        *int       `json:"document_type"`
-		StoragePath         *int       `json:"storage_path"`
-		ArchiveSerialNumber *int       `json:"archive_serial_number"`
-		Created             *time.Time `json:"created"`
-		Tags                *[]int     `json:"tags"`
+	exists, allowed := h.checkDocumentAccess(r, id)
+	if !exists {
+		http.NotFound(w, r)
+		return
 	}
+	if !allowed {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
+	var input struct {
+		Title               *string                            `json:"title"`
+		Correspondent       *int                               `json:"correspondent"`
+		DocumentType        *int                               `json:"document_type"`
+		StoragePath         *int                               `json:"storage_path"`
+		ArchiveSerialNumber *int                               `json:"archive_serial_number"`
+		CreatedDate         *string                            `json:"created_date"`
+		Tags                *[]int                             `json:"tags"`
+		CustomFields        *[]models.DocumentCustomFieldValue `json:"custom_fields"`
+		Owner               *int                               `json:"owner"`
+	}
+
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	user := GetUserFromContext(r.Context())
+	if input.Owner != nil && (user == nil || user.IsSuperuser || *input.Owner == user.ID) {
+		if *input.Owner == 0 {
+			_, _ = h.db.Exec("UPDATE documents SET owner_id = NULL, modified = CURRENT_TIMESTAMP WHERE id = ?", id)
+		} else {
+			_, _ = h.db.Exec("UPDATE documents SET owner_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *input.Owner, id)
+		}
 	}
 
 	if input.Title != nil {
@@ -268,9 +620,12 @@ func (h *DocumentsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if input.ArchiveSerialNumber != nil {
 		_, _ = h.db.Exec("UPDATE documents SET archive_serial_number = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *input.ArchiveSerialNumber, id)
 	}
-	if input.Created != nil {
-		_, _ = h.db.Exec("UPDATE documents SET created = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *input.Created, id)
+	if input.CreatedDate != nil {
+		if t, err := time.Parse("2006-01-02", *input.CreatedDate); err == nil {
+			_, _ = h.db.Exec("UPDATE documents SET created = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", t, id)
+		}
 	}
+
 	if input.Tags != nil {
 		_, _ = h.db.Exec("DELETE FROM document_tags WHERE document_id = ?", id)
 		for _, tagID := range *input.Tags {
@@ -278,10 +633,23 @@ func (h *DocumentsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	doc, err := h.fetchDocument(id)
+	if input.CustomFields != nil {
+		_, _ = h.db.Exec("DELETE FROM document_custom_fields WHERE document_id = ?", id)
+		for _, cf := range *input.CustomFields {
+			valJSON, _ := json.Marshal(cf.Value)
+			_, _ = h.db.Exec("INSERT INTO document_custom_fields (document_id, field_id, value_text) VALUES (?, ?, ?)", id, cf.Field, string(valJSON))
+		}
+	}
+
+	doc, err := h.fetchDocumentWithUser(id, user)
 	if err != nil {
 		http.NotFound(w, r)
 		return
+	}
+
+	// Trigger Native Workflows on Document Update (Feature #10)
+	if h.consumer != nil && h.consumer.GetWorkflowEngine() != nil {
+		_ = h.consumer.GetWorkflowEngine().ExecuteWorkflows(doc, workflow.TriggerDocumentUpdated, workflow.SourceWebUI)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -290,28 +658,191 @@ func (h *DocumentsHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 func (h *DocumentsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
-
-	var origName string
-	_ = h.db.QueryRow("SELECT original_filename FROM documents WHERE id = ?", id).Scan(&origName)
-
-	ext := filepath.Ext(origName)
-	origPath := filepath.Join(h.cfg.MediaDir, "documents", "originals", fmt.Sprintf("%07d%s", id, ext))
-	thumbPath := filepath.Join(h.cfg.MediaDir, "documents", "thumbnails", fmt.Sprintf("%07d.png", id))
-
-	_ = os.Remove(origPath)
-	_ = os.Remove(thumbPath)
-
-	_, err := h.db.Exec("DELETE FROM documents WHERE id = ?", id)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	exists, allowed := h.checkDocumentAccess(r, id)
+	if !exists {
+		http.NotFound(w, r)
 		return
+	}
+	if !allowed {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
+	// Soft delete matches paperless trash mechanism
+	_, _ = h.db.Exec("UPDATE documents SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", id)
+
+	if h.wsHub != nil {
+		h.wsHub.BroadcastDocumentsDeleted()
 	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (h *DocumentsHandler) DeleteDocuments(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Documents []int `json:"documents"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	user := GetUserFromContext(r.Context())
+	allowedDocs := h.filterAllowedDocuments(input.Documents, user)
+	for _, id := range allowedDocs {
+		_, _ = h.db.Exec("UPDATE documents SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", id)
+	}
+
+	if h.wsHub != nil {
+		h.wsHub.BroadcastDocumentsDeleted()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`"OK"`))
+}
+
+func (h *DocumentsHandler) ReprocessDocuments(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Documents []int `json:"documents"`
+		RemoteOCR bool  `json:"remote_ocr"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&input)
+
+	user := GetUserFromContext(r.Context())
+	allowedDocs := h.filterAllowedDocuments(input.Documents, user)
+
+	for _, id := range allowedDocs {
+		docID := id
+		var origName, mimeType string
+		err := h.db.QueryRow("SELECT original_filename, mime_type FROM documents WHERE id = ?", docID).Scan(&origName, &mimeType)
+		if err == nil {
+			filePath, _, err := h.getOriginalFilePath(docID)
+			if err == nil {
+				h.queue.Enqueue(fmt.Sprintf("Reprocess document %d", docID), origName, filePath, func(tid string) (int, error) {
+					text, _ := consumer.ExtractText(filePath, mimeType)
+					if text != "" {
+						_, _ = h.db.Exec("UPDATE documents SET content = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", text, docID)
+					}
+					thumbPath := filepath.Join(h.cfg.MediaDir, "documents", "thumbnails", fmt.Sprintf("%07d.png", docID))
+					_ = consumer.GenerateThumbnail(filePath, thumbPath, mimeType)
+					return docID, nil
+				})
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`"OK"`))
+}
+
+func (h *DocumentsHandler) NextASN(w http.ResponseWriter, r *http.Request) {
+	var nextASN int
+	_ = h.db.QueryRow("SELECT COALESCE(MAX(archive_serial_number), 0) + 1 FROM documents WHERE archive_serial_number IS NOT NULL").Scan(&nextASN)
+	if nextASN < 1 {
+		nextASN = 1
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(nextASN)
+}
+
+func (h *DocumentsHandler) BulkDownload(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Documents        []int  `json:"documents"`
+		Content          string `json:"content"`
+		FollowFormatting bool   `json:"follow_formatting"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&input)
+
+	user := GetUserFromContext(r.Context())
+	allowedDocs := h.filterAllowedDocuments(input.Documents, user)
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="paperless-documents.zip"`)
+
+	zw := zip.NewWriter(w)
+	defer zw.Close()
+
+	for _, id := range allowedDocs {
+		filePath, _, err := h.getBestFilePath(id, input.Content == "originals")
+		if err != nil {
+			continue
+		}
+		file, err := os.Open(filePath)
+		if err != nil {
+			continue
+		}
+
+		var origName string
+		_ = h.db.QueryRow("SELECT original_filename FROM documents WHERE id = ?", id).Scan(&origName)
+		if origName == "" {
+			origName = filepath.Base(filePath)
+		}
+
+		entryName := fmt.Sprintf("%07d_%s", id, origName)
+		fw, err := zw.Create(entryName)
+		if err == nil {
+			_, _ = io.Copy(fw, file)
+		}
+		file.Close()
+	}
+}
+
+func (h *DocumentsHandler) History(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode([]interface{}{})
+}
+
+func (h *DocumentsHandler) AISuggestions(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	exists, allowed := h.checkDocumentAccess(r, id)
+	if !exists {
+		http.NotFound(w, r)
+		return
+	}
+	if !allowed {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
+	doc, err := h.fetchDocument(id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	res := map[string]interface{}{
+		"tags":          []int{},
+		"correspondent": nil,
+		"document_type": nil,
+		"storage_path":  nil,
+	}
+
+	if h.consumer != nil && h.consumer.GetClassifier() != nil {
+		pred := h.consumer.GetClassifier().Classify(doc.Content + " " + doc.Title)
+		res["tags"] = pred.SuggestedTags
+		res["correspondent"] = pred.SuggestedCorrespondent
+		res["document_type"] = pred.SuggestedDocType
+		res["storage_path"] = pred.SuggestedStoragePath
+		res["tag_scores"] = pred.TagScores
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(res)
+}
+
+func (h *DocumentsHandler) Chat(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"message": "AI assistant is not configured on this instance.",
+	})
+}
+
 func (h *DocumentsHandler) PostDocument(w http.ResponseWriter, r *http.Request) {
-	// Multipart form upload
 	err := r.ParseMultipartForm(50 << 20) // 50MB max
 	if err != nil {
 		http.Error(w, "Failed to parse form: "+err.Error(), http.StatusBadRequest)
@@ -325,7 +856,6 @@ func (h *DocumentsHandler) PostDocument(w http.ResponseWriter, r *http.Request) 
 	}
 	defer file.Close()
 
-	// Save to temp folder for consumer
 	tmpFile, err := os.CreateTemp("", "paperless-upload-*"+filepath.Ext(header.Filename))
 	if err != nil {
 		http.Error(w, "Failed to create temp file", http.StatusInternalServerError)
@@ -342,6 +872,15 @@ func (h *DocumentsHandler) PostDocument(w http.ResponseWriter, r *http.Request) 
 	fileName := header.Filename
 
 	var opts consumer.ConsumeOptions
+	user := GetUserFromContext(r.Context())
+	if user != nil {
+		opts.Owner = &user.ID
+	}
+	if ownerStr := r.FormValue("owner"); ownerStr != "" && user != nil && user.IsSuperuser {
+		if oID, err := strconv.Atoi(ownerStr); err == nil {
+			opts.Owner = &oID
+		}
+	}
 	if t := r.FormValue("title"); t != "" {
 		opts.Title = t
 	}
@@ -355,21 +894,120 @@ func (h *DocumentsHandler) PostDocument(w http.ResponseWriter, r *http.Request) 
 			opts.DocumentType = &dtID
 		}
 	}
+	if spStr := r.FormValue("storage_path"); spStr != "" {
+		if spID, err := strconv.Atoi(spStr); err == nil {
+			opts.StoragePath = &spID
+		}
+	}
+	if asnStr := r.FormValue("archive_serial_number"); asnStr != "" {
+		if asn, err := strconv.Atoi(asnStr); err == nil {
+			opts.ArchiveSerialNumber = &asn
+		}
+	}
+	if crStr := r.FormValue("created"); crStr != "" {
+		if crTime, err := time.Parse(time.RFC3339, crStr); err == nil {
+			opts.Created = &crTime
+		} else if crDate, err := time.Parse("2006-01-02", crStr); err == nil {
+			opts.Created = &crDate
+		}
+	}
+	if r.MultipartForm != nil {
+		if tagVals, ok := r.MultipartForm.Value["tags"]; ok {
+			for _, tv := range tagVals {
+				for _, part := range strings.Split(tv, ",") {
+					if tid, err := strconv.Atoi(strings.TrimSpace(part)); err == nil {
+						opts.Tags = append(opts.Tags, tid)
+					}
+				}
+			}
+		}
+	}
 
-	// Enqueue in worker queue
+	// Pre-upload deduplication check if requested by client
+	if r.URL.Query().Get("check_duplicate") == "true" {
+		chk, err := consumer.CalculateChecksum(tmpPath)
+		if err == nil {
+			var existingID int
+			var existingTitle string
+			err = h.db.QueryRow("SELECT id, title FROM documents WHERE checksum = ? AND deleted_at IS NULL", chk).Scan(&existingID, &existingTitle)
+			if err == nil {
+				_ = os.Remove(tmpPath)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"detail":      fmt.Sprintf("Not consuming %s: It is a duplicate of %s (#%d)", fileName, existingTitle, existingID),
+					"existing_id": existingID,
+					"title":       existingTitle,
+				})
+				return
+			}
+		}
+	}
+
 	taskID := h.queue.Enqueue("Consume document", fileName, tmpPath, func(tid string) (int, error) {
 		defer os.Remove(tmpPath)
 		return h.consumer.ConsumeFile(tmpPath, fileName, &opts)
 	})
 
-	// Paperless-ngx API returns the task UUID as a JSON string
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(taskID)
 }
 
+func (h *DocumentsHandler) CheckDuplicate(w http.ResponseWriter, r *http.Request) {
+	checksum := r.URL.Query().Get("checksum")
+	if checksum == "" {
+		checksum = r.URL.Query().Get("md5")
+	}
+	if checksum == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "Missing checksum query parameter"})
+		return
+	}
+
+	user := GetUserFromContext(r.Context())
+	var id int
+	var title, origName string
+	var created time.Time
+	var err error
+
+	if user != nil && !user.IsSuperuser {
+		err = h.db.QueryRow("SELECT id, title, original_filename, created FROM documents WHERE checksum = ? AND (owner_id IS NULL OR owner_id = ?) AND deleted_at IS NULL", checksum, user.ID).Scan(&id, &title, &origName, &created)
+	} else {
+		err = h.db.QueryRow("SELECT id, title, original_filename, created FROM documents WHERE checksum = ? AND deleted_at IS NULL", checksum).Scan(&id, &title, &origName, &created)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err == nil {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"duplicate":         true,
+			"document_id":       id,
+			"title":             title,
+			"original_filename": origName,
+			"created":           created,
+		})
+	} else {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"duplicate": false,
+		})
+	}
+}
+
 func (h *DocumentsHandler) Preview(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
-	filePath, mimeType, err := h.getOriginalFilePath(id)
+	exists, allowed := h.checkDocumentAccess(r, id)
+	if !exists {
+		http.NotFound(w, r)
+		return
+	}
+	if !allowed {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
+	filePath, mimeType, err := h.getBestFilePath(id, r.URL.Query().Get("original") == "true")
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -382,7 +1020,19 @@ func (h *DocumentsHandler) Preview(w http.ResponseWriter, r *http.Request) {
 
 func (h *DocumentsHandler) Download(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
-	filePath, mimeType, err := h.getOriginalFilePath(id)
+	exists, allowed := h.checkDocumentAccess(r, id)
+	if !exists {
+		http.NotFound(w, r)
+		return
+	}
+	if !allowed {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
+	filePath, mimeType, err := h.getBestFilePath(id, r.URL.Query().Get("original") == "true")
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -398,11 +1048,26 @@ func (h *DocumentsHandler) Download(w http.ResponseWriter, r *http.Request) {
 
 func (h *DocumentsHandler) Thumb(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	exists, allowed := h.checkDocumentAccess(r, id)
+	if !exists {
+		http.NotFound(w, r)
+		return
+	}
+	if !allowed {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
 	thumbPath := filepath.Join(h.cfg.MediaDir, "documents", "thumbnails", fmt.Sprintf("%07d.png", id))
 
 	if _, err := os.Stat(thumbPath); err != nil {
-		// If thumbnail not yet generated, generate placeholder
-		_ = consumer.GenerateThumbnail("", thumbPath, "application/pdf")
+		if srcPath, mType, err := h.getOriginalFilePath(id); err == nil {
+			_ = consumer.GenerateThumbnail(srcPath, thumbPath, mType)
+		} else {
+			_ = consumer.GenerateThumbnail("", thumbPath, "application/pdf")
+		}
 	}
 
 	w.Header().Set("Content-Type", "image/png")
@@ -412,14 +1077,27 @@ func (h *DocumentsHandler) Thumb(w http.ResponseWriter, r *http.Request) {
 
 func (h *DocumentsHandler) Metadata(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	exists, allowed := h.checkDocumentAccess(r, id)
+	if !exists {
+		http.NotFound(w, r)
+		return
+	}
+	if !allowed {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
 	filePath, mimeType, err := h.getOriginalFilePath(id)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
 
-	var checksum string
-	_ = h.db.QueryRow("SELECT checksum FROM documents WHERE id = ?", id).Scan(&checksum)
+	var checksum, origName string
+	var archFileName sql.NullString
+	_ = h.db.QueryRow("SELECT checksum, original_filename, archive_filename FROM documents WHERE id = ?", id).Scan(&checksum, &origName, &archFileName)
 
 	info, _ := os.Stat(filePath)
 	size := int64(0)
@@ -427,19 +1105,355 @@ func (h *DocumentsHandler) Metadata(w http.ResponseWriter, r *http.Request) {
 		size = info.Size()
 	}
 
+	hasArchive := archFileName.Valid && archFileName.String != ""
+	var archSize int64
+	var archChecksum, archMediaFilename string
+	if hasArchive {
+		archPath := filepath.Join(h.cfg.MediaDir, "documents", "archive", archFileName.String)
+		if aInfo, err := os.Stat(archPath); err == nil {
+			archSize = aInfo.Size()
+			archChecksum, _ = consumer.CalculateChecksum(archPath)
+			archMediaFilename = archFileName.String
+		}
+	}
+
 	resp := map[string]interface{}{
-		"original_checksum":   checksum,
-		"original_size":       size,
-		"original_mime_type":  mimeType,
-		"media_filename":      filepath.Base(filePath),
-		"has_archive_version": false,
-		"original_metadata":   []interface{}{},
+		"original_checksum":      checksum,
+		"original_size":          size,
+		"original_mime_type":     mimeType,
+		"original_filename":      origName,
+		"media_filename":         filepath.Base(filePath),
+		"has_archive_version":    hasArchive,
+		"archive_checksum":       archChecksum,
+		"archive_size":           archSize,
+		"archive_media_filename": archMediaFilename,
+		"original_metadata":      []interface{}{},
+		"archive_metadata":       []interface{}{},
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// Suggestions endpoint (/api/documents/{id}/suggestions/)
+func (h *DocumentsHandler) Suggestions(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	exists, allowed := h.checkDocumentAccess(r, id)
+	if !exists {
+		http.NotFound(w, r)
+		return
+	}
+	if !allowed {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+	doc, err := h.fetchDocument(id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	resp := models.SuggestionsResponse{
+		Tags:           []int{},
+		Correspondents: []int{},
+		DocumentTypes:  []int{},
+		StoragePaths:   []int{},
+		Dates:          []string{},
+	}
+
+	// Auto-detect dates from content
+	if detected := consumer.ExtractDocumentDate(doc.Content); detected != nil {
+		resp.Dates = append(resp.Dates, detected.Format("2006-01-02"))
+	}
+
+	// Match tags against content
+	rowsT, err := h.db.Query("SELECT id, name, match, matching_algorithm, is_insensitive FROM tags WHERE match != ''")
+	if err == nil {
+		defer rowsT.Close()
+		for rowsT.Next() {
+			var tid, algo int
+			var name, match string
+			var insensitive bool
+			if err := rowsT.Scan(&tid, &name, &match, &algo, &insensitive); err == nil {
+				if strings.Contains(strings.ToLower(doc.Content), strings.ToLower(match)) {
+					resp.Tags = append(resp.Tags, tid)
+				}
+			}
+		}
+		_ = rowsT.Err()
+	}
+
+	// Match correspondents against content
+	rowsC, err := h.db.Query("SELECT id, name, match, matching_algorithm, is_insensitive FROM correspondents WHERE match != ''")
+	if err == nil {
+		defer rowsC.Close()
+		for rowsC.Next() {
+			var cid, algo int
+			var name, match string
+			var insensitive bool
+			if err := rowsC.Scan(&cid, &name, &match, &algo, &insensitive); err == nil {
+				if strings.Contains(strings.ToLower(doc.Content), strings.ToLower(match)) {
+					resp.Correspondents = append(resp.Correspondents, cid)
+				}
+			}
+		}
+		_ = rowsC.Err()
+	}
+
+	// Match document types against content
+	rowsDT, err := h.db.Query("SELECT id, name, match, matching_algorithm, is_insensitive FROM document_types WHERE match != ''")
+	if err == nil {
+		defer rowsDT.Close()
+		for rowsDT.Next() {
+			var dtid, algo int
+			var name, match string
+			var insensitive bool
+			if err := rowsDT.Scan(&dtid, &name, &match, &algo, &insensitive); err == nil {
+				if strings.Contains(strings.ToLower(doc.Content), strings.ToLower(match)) {
+					resp.DocumentTypes = append(resp.DocumentTypes, dtid)
+				}
+			}
+		}
+		_ = rowsDT.Err()
+	}
+
+	// Semantic Vector Classifier integration (Feature #6)
+	if h.consumer != nil && h.consumer.GetClassifier() != nil {
+		pred := h.consumer.GetClassifier().Classify(doc.Content + " " + doc.Title)
+		tagSet := make(map[int]bool)
+		for _, t := range resp.Tags {
+			tagSet[t] = true
+		}
+		for _, t := range pred.SuggestedTags {
+			if !tagSet[t] {
+				resp.Tags = append(resp.Tags, t)
+				tagSet[t] = true
+			}
+		}
+		if len(resp.Correspondents) == 0 && pred.SuggestedCorrespondent != nil {
+			resp.Correspondents = append(resp.Correspondents, *pred.SuggestedCorrespondent)
+		}
+		if len(resp.DocumentTypes) == 0 && pred.SuggestedDocType != nil {
+			resp.DocumentTypes = append(resp.DocumentTypes, *pred.SuggestedDocType)
+		}
+		if len(resp.StoragePaths) == 0 && pred.SuggestedStoragePath != nil {
+			resp.StoragePaths = append(resp.StoragePaths, *pred.SuggestedStoragePath)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// Notes endpoints (/api/documents/{id}/notes/)
+func (h *DocumentsHandler) GetNotes(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	exists, allowed := h.checkDocumentAccess(r, id)
+	if !exists {
+		http.NotFound(w, r)
+		return
+	}
+	if !allowed {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
+	notes := h.getDocNotes(id)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(notes)
+}
+
+func (h *DocumentsHandler) CreateNote(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	exists, allowed := h.checkDocumentAccess(r, id)
+	if !exists {
+		http.NotFound(w, r)
+		return
+	}
+	if !allowed {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
+	var input struct {
+		Note string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil || strings.TrimSpace(input.Note) == "" {
+		http.Error(w, "Note text is required", http.StatusBadRequest)
+		return
+	}
+
+	user := GetUserFromContext(r.Context())
+	var userID *int
+	if user != nil {
+		userID = &user.ID
+	}
+
+	res, err := h.db.Exec(`
+		INSERT INTO document_notes (document_id, note, user_id, created)
+		VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+	`, id, input.Note, userID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	noteID, _ := res.LastInsertId()
+	note := models.DocumentNote{
+		ID:      int(noteID),
+		Note:    input.Note,
+		Created: time.Now(),
+		User:    userID,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(note)
+}
+
+func (h *DocumentsHandler) DeleteNote(w http.ResponseWriter, r *http.Request) {
+	noteIDStr := chi.URLParam(r, "note_id")
+	if noteIDStr == "" {
+		noteIDStr = r.URL.Query().Get("id")
+	}
+	noteID, _ := strconv.Atoi(noteIDStr)
+
+	user := GetUserFromContext(r.Context())
+	if user != nil && !user.IsSuperuser {
+		var docID int
+		var noteUserID sql.NullInt64
+		err := h.db.QueryRow("SELECT document_id, user_id FROM document_notes WHERE id = ?", noteID).Scan(&docID, &noteUserID)
+		if err == nil {
+			_, allowed := h.checkDocumentAccess(r, docID)
+			if !allowed && (!noteUserID.Valid || int(noteUserID.Int64) != user.ID) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+				return
+			}
+		}
+	}
+
+	_, _ = h.db.Exec("DELETE FROM document_notes WHERE id = ?", noteID)
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// SelectionData (/api/documents/selection_data/)
+func (h *DocumentsHandler) SelectionData(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Documents []int `json:"documents"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&input)
+
+	user := GetUserFromContext(r.Context())
+	allowedDocs := h.filterAllowedDocuments(input.Documents, user)
+
+	resp := models.SelectionDataResponse{
+		SelectedStoragePaths:   []models.SelectionItem{},
+		SelectedCustomFields:   []models.SelectionItem{},
+		SelectedCorrespondents: []models.SelectionItem{},
+		SelectedTags:           []models.SelectionItem{},
+		SelectedDocumentTypes:  []models.SelectionItem{},
+	}
+
+	if len(allowedDocs) > 0 {
+		var placeholders []string
+		var args []interface{}
+		for _, id := range allowedDocs {
+			placeholders = append(placeholders, "?")
+			args = append(args, id)
+		}
+		inClause := strings.Join(placeholders, ",")
+
+		// Correspondents
+		rowsC, err := h.db.Query(fmt.Sprintf(`
+			SELECT correspondent_id, COUNT(*) FROM documents WHERE id IN (%s) AND correspondent_id IS NOT NULL GROUP BY correspondent_id
+		`, inClause), args...)
+		if err == nil {
+			defer rowsC.Close()
+			for rowsC.Next() {
+				var item models.SelectionItem
+				if err := rowsC.Scan(&item.ID, &item.DocumentCount); err == nil {
+					resp.SelectedCorrespondents = append(resp.SelectedCorrespondents, item)
+				}
+			}
+			_ = rowsC.Err()
+		}
+
+		// Tags
+		rowsT, err := h.db.Query(fmt.Sprintf(`
+			SELECT tag_id, COUNT(*) FROM document_tags WHERE document_id IN (%s) GROUP BY tag_id
+		`, inClause), args...)
+		if err == nil {
+			defer rowsT.Close()
+			for rowsT.Next() {
+				var item models.SelectionItem
+				if err := rowsT.Scan(&item.ID, &item.DocumentCount); err == nil {
+					resp.SelectedTags = append(resp.SelectedTags, item)
+				}
+			}
+			_ = rowsT.Err()
+		}
+
+		// Document Types
+		rowsDT, err := h.db.Query(fmt.Sprintf(`
+			SELECT document_type_id, COUNT(*) FROM documents WHERE id IN (%s) AND document_type_id IS NOT NULL GROUP BY document_type_id
+		`, inClause), args...)
+		if err == nil {
+			defer rowsDT.Close()
+			for rowsDT.Next() {
+				var item models.SelectionItem
+				if err := rowsDT.Scan(&item.ID, &item.DocumentCount); err == nil {
+					resp.SelectedDocumentTypes = append(resp.SelectedDocumentTypes, item)
+				}
+			}
+			_ = rowsDT.Err()
+		}
+
+		// Storage Paths
+		rowsSP, err := h.db.Query(fmt.Sprintf(`
+			SELECT storage_path_id, COUNT(*) FROM documents WHERE id IN (%s) AND storage_path_id IS NOT NULL GROUP BY storage_path_id
+		`, inClause), args...)
+		if err == nil {
+			defer rowsSP.Close()
+			for rowsSP.Next() {
+				var item models.SelectionItem
+				if err := rowsSP.Scan(&item.ID, &item.DocumentCount); err == nil {
+					resp.SelectedStoragePaths = append(resp.SelectedStoragePaths, item)
+				}
+			}
+			_ = rowsSP.Err()
+		}
+
+		// Custom Fields
+		rowsCF, err := h.db.Query(fmt.Sprintf(`
+			SELECT field_id, COUNT(*) FROM document_custom_fields WHERE document_id IN (%s) GROUP BY field_id
+		`, inClause), args...)
+		if err == nil {
+			defer rowsCF.Close()
+			for rowsCF.Next() {
+				var item models.SelectionItem
+				if err := rowsCF.Scan(&item.ID, &item.DocumentCount); err == nil {
+					resp.SelectedCustomFields = append(resp.SelectedCustomFields, item)
+				}
+			}
+			_ = rowsCF.Err()
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// BulkEdit (/api/documents/bulk_edit/)
 func (h *DocumentsHandler) BulkEdit(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
 		Documents  []int                  `json:"documents"`
@@ -451,36 +1465,91 @@ func (h *DocumentsHandler) BulkEdit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	user := GetUserFromContext(r.Context())
+	allowedDocs := h.filterAllowedDocuments(payload.Documents, user)
+	payload.Documents = allowedDocs
+
 	switch payload.Method {
 	case "delete":
 		for _, id := range payload.Documents {
-			var origName string
-			_ = h.db.QueryRow("SELECT original_filename FROM documents WHERE id = ?", id).Scan(&origName)
-			ext := filepath.Ext(origName)
-			_ = os.Remove(filepath.Join(h.cfg.MediaDir, "documents", "originals", fmt.Sprintf("%07d%s", id, ext)))
-			_ = os.Remove(filepath.Join(h.cfg.MediaDir, "documents", "thumbnails", fmt.Sprintf("%07d.png", id)))
-			_, _ = h.db.Exec("DELETE FROM documents WHERE id = ?", id)
+			_, _ = h.db.Exec("UPDATE documents SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", id)
 		}
+		if h.wsHub != nil {
+			h.wsHub.BroadcastDocumentsDeleted()
+		}
+
+	case "modify_tags":
+		var addTags, removeTags []int
+		if adds, ok := payload.Parameters["add_tags"].([]interface{}); ok {
+			for _, a := range adds {
+				if val, ok := a.(float64); ok {
+					addTags = append(addTags, int(val))
+				}
+			}
+		}
+		if rems, ok := payload.Parameters["remove_tags"].([]interface{}); ok {
+			for _, r := range rems {
+				if val, ok := r.(float64); ok {
+					removeTags = append(removeTags, int(val))
+				}
+			}
+		}
+
+		for _, id := range payload.Documents {
+			for _, tid := range addTags {
+				_, _ = h.db.Exec("INSERT OR IGNORE INTO document_tags (document_id, tag_id) VALUES (?, ?)", id, tid)
+			}
+			for _, tid := range removeTags {
+				_, _ = h.db.Exec("DELETE FROM document_tags WHERE document_id = ? AND tag_id = ?", id, tid)
+			}
+		}
+
 	case "set_correspondent":
-		if corrVal, ok := payload.Parameters["correspondent"]; ok {
-			var corrID *int
+		var corrID *int
+		if corrVal, ok := payload.Parameters["correspondent"]; ok && corrVal != nil {
 			if c, ok := corrVal.(float64); ok && c > 0 {
 				idInt := int(c)
 				corrID = &idInt
 			}
-			for _, id := range payload.Documents {
-				_, _ = h.db.Exec("UPDATE documents SET correspondent_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", corrID, id)
-			}
 		}
+		for _, id := range payload.Documents {
+			_, _ = h.db.Exec("UPDATE documents SET correspondent_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", corrID, id)
+		}
+
 	case "set_document_type":
-		if typeVal, ok := payload.Parameters["document_type"]; ok {
-			var dtID *int
+		var dtID *int
+		if typeVal, ok := payload.Parameters["document_type"]; ok && typeVal != nil {
 			if dt, ok := typeVal.(float64); ok && dt > 0 {
 				idInt := int(dt)
 				dtID = &idInt
 			}
-			for _, id := range payload.Documents {
-				_, _ = h.db.Exec("UPDATE documents SET document_type_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", dtID, id)
+		}
+		for _, id := range payload.Documents {
+			_, _ = h.db.Exec("UPDATE documents SET document_type_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", dtID, id)
+		}
+
+	case "set_storage_path":
+		var spID *int
+		if pathVal, ok := payload.Parameters["storage_path"]; ok && pathVal != nil {
+			if sp, ok := pathVal.(float64); ok && sp > 0 {
+				idInt := int(sp)
+				spID = &idInt
+			}
+		}
+		for _, id := range payload.Documents {
+			_, _ = h.db.Exec("UPDATE documents SET storage_path_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", spID, id)
+		}
+
+	case "reprocess":
+		for _, id := range payload.Documents {
+			filePath, mimeType, err := h.getOriginalFilePath(id)
+			if err == nil {
+				text, _ := consumer.ExtractText(filePath, mimeType)
+				if text != "" {
+					_, _ = h.db.Exec("UPDATE documents SET content = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", text, id)
+				}
+				thumbPath := filepath.Join(h.cfg.MediaDir, "documents", "thumbnails", fmt.Sprintf("%07d.png", id))
+				_ = consumer.GenerateThumbnail(filePath, thumbPath, mimeType)
 			}
 		}
 	}
@@ -489,7 +1558,128 @@ func (h *DocumentsHandler) BulkEdit(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`"OK"`))
 }
 
-func (h *DocumentsHandler) fetchDocument(id int) (*models.Document, error) {
+// Trash endpoints (/api/trash/)
+func (h *DocumentsHandler) TrashList(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	pageSize := 25
+	offset := (page - 1) * pageSize
+
+	user := GetUserFromContext(r.Context())
+	var conditions []string
+	var args []interface{}
+	conditions = append(conditions, "deleted_at IS NOT NULL")
+	if user != nil && !user.IsSuperuser {
+		conditions = append(conditions, "(owner_id IS NULL OR owner_id = ?)")
+		args = append(args, user.ID)
+	}
+	whereClause := "WHERE " + strings.Join(conditions, " AND ")
+
+	var totalCount int
+	_ = h.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM documents %s", whereClause), args...).Scan(&totalCount)
+
+	pageArgs := append(args, pageSize, offset)
+	rows, err := h.db.Query(fmt.Sprintf(`
+		SELECT id, title, created, original_filename, deleted_at
+		FROM documents %s ORDER BY deleted_at DESC LIMIT ? OFFSET ?
+	`, whereClause), pageArgs...)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var results []map[string]interface{}
+	var allIDs []int
+	for rows.Next() {
+		var id int
+		var title, origName string
+		var created, deleted time.Time
+		if err := rows.Scan(&id, &title, &created, &origName, &deleted); err == nil {
+			results = append(results, map[string]interface{}{
+				"id":                id,
+				"title":             title,
+				"created":           created,
+				"original_filename": origName,
+				"deleted_at":        deleted,
+			})
+			allIDs = append(allIDs, id)
+		}
+	}
+	_ = rows.Err()
+	if results == nil {
+		results = []map[string]interface{}{}
+		allIDs = []int{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(models.PaginatedResponse{
+		Count:   totalCount,
+		All:     allIDs,
+		Results: results,
+	})
+}
+
+func (h *DocumentsHandler) TrashAction(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Action    string `json:"action"` // "restore" or "empty"
+		Documents []int  `json:"documents"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	user := GetUserFromContext(r.Context())
+	allowedDocs := h.filterAllowedDocuments(input.Documents, user)
+
+	if input.Action == "restore" {
+		for _, id := range allowedDocs {
+			_, _ = h.db.Exec("UPDATE documents SET deleted_at = NULL WHERE id = ?", id)
+		}
+	} else if input.Action == "empty" {
+		var ids []int
+		if len(input.Documents) > 0 {
+			ids = allowedDocs
+		} else {
+			query := "SELECT id FROM documents WHERE deleted_at IS NOT NULL"
+			var qArgs []interface{}
+			if user != nil && !user.IsSuperuser {
+				query += " AND (owner_id IS NULL OR owner_id = ?)"
+				qArgs = append(qArgs, user.ID)
+			}
+			rows, err := h.db.Query(query, qArgs...)
+			if err == nil {
+				defer rows.Close()
+				for rows.Next() {
+					var id int
+					if err := rows.Scan(&id); err == nil {
+						ids = append(ids, id)
+					}
+				}
+				_ = rows.Err()
+			}
+		}
+
+		for _, id := range ids {
+			var origName string
+			_ = h.db.QueryRow("SELECT original_filename FROM documents WHERE id = ?", id).Scan(&origName)
+			ext := filepath.Ext(origName)
+			_ = os.Remove(filepath.Join(h.cfg.MediaDir, "documents", "originals", fmt.Sprintf("%07d%s", id, ext)))
+			_ = os.Remove(filepath.Join(h.cfg.MediaDir, "documents", "archive", fmt.Sprintf("%07d.pdf", id)))
+			_ = os.Remove(filepath.Join(h.cfg.MediaDir, "documents", "thumbnails", fmt.Sprintf("%07d.png", id)))
+			_, _ = h.db.Exec("DELETE FROM documents WHERE id = ?", id)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`"OK"`))
+}
+
+func (h *DocumentsHandler) fetchDocumentWithUser(id int, user *models.User) (*models.Document, error) {
 	var doc models.Document
 	var corr, docType, storPath, owner, asn sql.NullInt64
 	var archFile sql.NullString
@@ -497,12 +1687,12 @@ func (h *DocumentsHandler) fetchDocument(id int) (*models.Document, error) {
 	err := h.db.QueryRow(`
 		SELECT d.id, d.title, d.content, d.correspondent_id, d.document_type_id, d.storage_path_id,
 		       d.created, d.modified, d.added, d.archive_serial_number, d.original_filename, d.archive_filename,
-		       d.owner_id, d.page_count
+		       d.mime_type, d.owner_id, d.page_count
 		FROM documents d WHERE d.id = ?
 	`, id).Scan(
 		&doc.ID, &doc.Title, &doc.Content, &corr, &docType, &storPath,
 		&doc.Created, &doc.Modified, &doc.Added, &asn, &doc.OriginalFileName, &archFile,
-		&owner, &doc.PageCount,
+		&doc.MimeType, &owner, &doc.PageCount,
 	)
 	if err != nil {
 		return nil, err
@@ -532,13 +1722,22 @@ func (h *DocumentsHandler) fetchDocument(id int) (*models.Document, error) {
 		doc.ArchivedFileName = &archFile.String
 	}
 
+	doc.Content = compress.DecompressText(doc.Content)
 	doc.CreatedDate = doc.Created.Format("2006-01-02")
 	doc.UserCanChange = true
-	doc.Notes = []models.DocumentNote{}
-	doc.CustomFields = []models.DocumentCustomFieldValue{}
+	if user != nil && !user.IsSuperuser {
+		doc.UserCanChange = (doc.Owner == nil || *doc.Owner == user.ID)
+	}
+	doc.IsSharedByRequester = (user != nil && doc.Owner != nil && *doc.Owner == user.ID)
+	doc.Notes = h.getDocNotes(doc.ID)
+	doc.CustomFields = h.getDocCustomFields(doc.ID)
 	doc.Tags = h.getDocTags(doc.ID)
 
 	return &doc, nil
+}
+
+func (h *DocumentsHandler) fetchDocument(id int) (*models.Document, error) {
+	return h.fetchDocumentWithUser(id, nil)
 }
 
 func (h *DocumentsHandler) getDocTags(docID int) []int {
@@ -555,10 +1754,80 @@ func (h *DocumentsHandler) getDocTags(docID int) []int {
 			tags = append(tags, tid)
 		}
 	}
+	_ = rows.Err()
 	if tags == nil {
 		tags = []int{}
 	}
 	return tags
+}
+
+func (h *DocumentsHandler) getDocNotes(docID int) []models.DocumentNote {
+	rows, err := h.db.Query("SELECT id, note, created, user_id FROM document_notes WHERE document_id = ? ORDER BY created ASC", docID)
+	if err != nil {
+		return []models.DocumentNote{}
+	}
+	defer rows.Close()
+
+	var notes []models.DocumentNote
+	for rows.Next() {
+		var n models.DocumentNote
+		var uid sql.NullInt64
+		if err := rows.Scan(&n.ID, &n.Note, &n.Created, &uid); err == nil {
+			if uid.Valid {
+				u := int(uid.Int64)
+				n.User = &u
+			}
+			notes = append(notes, n)
+		}
+	}
+	_ = rows.Err()
+	if notes == nil {
+		notes = []models.DocumentNote{}
+	}
+	return notes
+}
+
+func (h *DocumentsHandler) getDocCustomFields(docID int) []models.DocumentCustomFieldValue {
+	rows, err := h.db.Query("SELECT field_id, value_text FROM document_custom_fields WHERE document_id = ?", docID)
+	if err != nil {
+		return []models.DocumentCustomFieldValue{}
+	}
+	defer rows.Close()
+
+	var cfs []models.DocumentCustomFieldValue
+	for rows.Next() {
+		var cf models.DocumentCustomFieldValue
+		var valStr string
+		if err := rows.Scan(&cf.Field, &valStr); err == nil {
+			cf.Value = valStr
+			cfs = append(cfs, cf)
+		}
+	}
+	_ = rows.Err()
+	if cfs == nil {
+		cfs = []models.DocumentCustomFieldValue{}
+	}
+	return cfs
+}
+
+func (h *DocumentsHandler) getBestFilePath(docID int, forceOriginal bool) (string, string, error) {
+	var origName, mimeType string
+	var archFileName sql.NullString
+	err := h.db.QueryRow("SELECT original_filename, mime_type, archive_filename FROM documents WHERE id = ?", docID).Scan(&origName, &mimeType, &archFileName)
+	if err != nil {
+		return "", "", err
+	}
+
+	if !forceOriginal && archFileName.Valid && archFileName.String != "" {
+		archivePath := filepath.Join(h.cfg.MediaDir, "documents", "archive", archFileName.String)
+		if _, err := os.Stat(archivePath); err == nil {
+			return archivePath, "application/pdf", nil
+		}
+	}
+
+	ext := filepath.Ext(origName)
+	path := filepath.Join(h.cfg.MediaDir, "documents", "originals", fmt.Sprintf("%07d%s", docID, ext))
+	return path, mimeType, nil
 }
 
 func (h *DocumentsHandler) getOriginalFilePath(docID int) (string, string, error) {

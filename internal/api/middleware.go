@@ -28,6 +28,16 @@ func AuthMiddleware(authSvc *auth.Service) func(http.Handler) http.Handler {
 
 			user, err := authSvc.AuthenticateRequest(r)
 			if err == nil && user != nil {
+				if _, err := r.Cookie("sessionid"); err != nil && user.AuthToken != nil {
+					http.SetCookie(w, &http.Cookie{
+						Name:     "sessionid",
+						Value:    *user.AuthToken,
+						Path:     "/",
+						HttpOnly: true,
+						SameSite: http.SameSiteLaxMode,
+					})
+				}
+
 				ctx := context.WithValue(r.Context(), UserContextKey, user)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
@@ -36,6 +46,19 @@ func AuthMiddleware(authSvc *auth.Service) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func RequireAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user := GetUserFromContext(r.Context())
+		if user == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"detail": "Authentication credentials were not provided."}`))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func GetUserFromContext(ctx context.Context) *models.User {

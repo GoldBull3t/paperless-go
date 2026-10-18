@@ -35,7 +35,7 @@ func main() {
 	defer db.Close()
 
 	// 3. Initialize Auth Service & default admin
-	authSvc := auth.NewService(db)
+	authSvc := auth.NewService(db, cfg)
 	if err := authSvc.EnsureDefaultAdmin("admin", "admin"); err != nil {
 		log.Fatalf("Failed to initialize default admin: %v", err)
 	}
@@ -45,6 +45,7 @@ func main() {
 	defer taskQueue.Close()
 
 	wsHub := api.NewWebSocketHub()
+	defer wsHub.Close()
 	taskQueue.SetBroadcaster(wsHub)
 
 	// 5. Initialize Document Consumer & Watcher

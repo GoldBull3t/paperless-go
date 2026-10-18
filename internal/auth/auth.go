@@ -2,22 +2,25 @@ package auth
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
+	"paperless-go/internal/config"
 	"paperless-go/internal/database"
 	"paperless-go/internal/models"
 )
 
 type Service struct {
-	db *database.DB
+	db  *database.DB
+	cfg *config.Config
 }
 
-func NewService(db *database.DB) *Service {
-	return &Service{db: db}
+func NewService(db *database.DB, cfg *config.Config) *Service {
+	return &Service{db: db, cfg: cfg}
 }
 
 func (s *Service) HashPassword(password string) (string, error) {
@@ -103,15 +106,23 @@ func (s *Service) AuthenticateRequest(r *http.Request) (*models.User, error) {
 		}
 	}
 
-	// If no valid auth found, check if there's any user
-	var user models.User
-	err = s.db.QueryRow(`
-		SELECT id, username, email, first_name, last_name, is_superuser, is_staff, is_active, date_joined
-		FROM users WHERE is_superuser = 1 AND is_active = 1 LIMIT 1
-	`).Scan(&user.ID, &user.Username, &user.Email, &user.FirstName, &user.LastName, &user.IsSuperuser, &user.IsStaff, &user.IsActive, &user.DateJoined)
-	if err == nil {
-		// Single-tenant auto-auth for local development/deployment if configured or fallback
-		return &user, nil
+	// 3. Fallback auto-auth ONLY IF explicitly enabled via PAPERLESS_AUTO_LOGIN (default true)
+	if s.cfg != nil && s.cfg.AutoLogin {
+		var user models.User
+		var token sql.NullString
+		err = s.db.QueryRow(`
+			SELECT id, username, email, first_name, last_name, is_superuser, is_staff, is_active, date_joined, auth_token
+			FROM users WHERE is_superuser = 1 AND is_active = 1 LIMIT 1
+		`).Scan(&user.ID, &user.Username, &user.Email, &user.FirstName, &user.LastName, &user.IsSuperuser, &user.IsStaff, &user.IsActive, &user.DateJoined, &token)
+		if err == nil {
+			tVal := token.String
+			if !token.Valid || tVal == "" {
+				tVal = GenerateToken(40)
+				_, _ = s.db.Exec("UPDATE users SET auth_token = ? WHERE id = ?", tVal, user.ID)
+			}
+			user.AuthToken = &tVal
+			return &user, nil
+		}
 	}
 
 	return nil, fmt.Errorf("unauthorized")

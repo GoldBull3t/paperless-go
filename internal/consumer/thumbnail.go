@@ -63,7 +63,17 @@ func createPlaceholderThumbnail(outputPath, title string) error {
 	paperColor := color.RGBA{R: 248, G: 249, B: 250, A: 255}
 	borderColor := color.RGBA{R: 222, G: 226, B: 230, A: 255}
 	lineColor := color.RGBA{R: 206, G: 212, B: 218, A: 255}
-	accentColor := color.RGBA{R: 25, G: 135, B: 84, A: 255}
+	accentColor := color.RGBA{R: 25, G: 135, B: 84, A: 255} // Default green
+
+	ext := strings.ToLower(filepath.Ext(title))
+	switch ext {
+	case ".docx", ".doc", ".odt":
+		accentColor = color.RGBA{R: 43, G: 87, B: 154, A: 255} // Word blue
+	case ".xlsx", ".xls", ".ods":
+		accentColor = color.RGBA{R: 33, G: 115, B: 70, A: 255} // Excel green
+	case ".pptx", ".ppt", ".odp":
+		accentColor = color.RGBA{R: 210, G: 71, B: 38, A: 255} // PowerPoint orange
+	}
 
 	draw.Draw(img, img.Bounds(), &image.Uniform{C: paperColor}, image.Point{}, draw.Src)
 

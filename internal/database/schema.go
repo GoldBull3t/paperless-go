@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS users (
     is_staff BOOLEAN DEFAULT 0,
     is_active BOOLEAN DEFAULT 1,
     date_joined DATETIME DEFAULT CURRENT_TIMESTAMP,
+    totp_secret TEXT DEFAULT '',
+    is_mfa_enabled BOOLEAN DEFAULT 0,
+    recovery_codes_json TEXT DEFAULT '[]',
     auth_token TEXT UNIQUE
 );
 
@@ -93,7 +96,8 @@ CREATE TABLE IF NOT EXISTS documents (
     checksum TEXT NOT NULL,
     mime_type TEXT NOT NULL,
     page_count INTEGER DEFAULT 1,
-    owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+    owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    deleted_at DATETIME
 );
 
 CREATE TABLE IF NOT EXISTS document_tags (
@@ -147,6 +151,40 @@ CREATE TABLE IF NOT EXISTS app_config (
     config_json TEXT DEFAULT '{}'
 );
 
+CREATE TABLE IF NOT EXISTS share_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expiration DATETIME,
+    slug TEXT UNIQUE NOT NULL,
+    document_id INTEGER REFERENCES documents(id) ON DELETE CASCADE,
+    file_format TEXT DEFAULT 'original'
+);
+
+CREATE TABLE IF NOT EXISTS workflows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    order_num INTEGER DEFAULT 0,
+    enabled BOOLEAN DEFAULT 1,
+    triggers_json TEXT DEFAULT '[]',
+    actions_json TEXT DEFAULT '[]'
+);
+
+CREATE TABLE IF NOT EXISTS mail_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    server TEXT NOT NULL,
+    port INTEGER DEFAULT 993,
+    username TEXT NOT NULL,
+    password TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mail_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    account_id INTEGER REFERENCES mail_accounts(id) ON DELETE CASCADE,
+    order_num INTEGER DEFAULT 0
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
     title,
     content,
@@ -173,4 +211,5 @@ CREATE INDEX IF NOT EXISTS idx_documents_added ON documents(added);
 CREATE INDEX IF NOT EXISTS idx_documents_correspondent ON documents(correspondent_id);
 CREATE INDEX IF NOT EXISTS idx_documents_type ON documents(document_type_id);
 CREATE INDEX IF NOT EXISTS idx_documents_archive_num ON documents(archive_serial_number);
+CREATE INDEX IF NOT EXISTS idx_documents_deleted ON documents(deleted_at);
 `

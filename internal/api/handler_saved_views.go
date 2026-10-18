@@ -3,6 +3,7 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -20,10 +21,22 @@ func NewSavedViewsHandler(db *database.DB) *SavedViewsHandler {
 }
 
 func (h *SavedViewsHandler) List(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.Query(`
+	user := GetUserFromContext(r.Context())
+	var whereClause string
+	var args []interface{}
+	if user != nil && !user.IsSuperuser {
+		whereClause = "WHERE (owner_id IS NULL OR owner_id = ?)"
+		args = append(args, user.ID)
+	}
+
+	query := fmt.Sprintf(`
 		SELECT id, name, show_on_dashboard, show_in_sidebar, sort_field, sort_reverse, filter_rules, owner_id
-		FROM saved_views ORDER BY name ASC
-	`)
+		FROM saved_views
+		%s
+		ORDER BY name ASC
+	`, whereClause)
+
+	rows, err := h.db.Query(query, args...)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -42,7 +55,7 @@ func (h *SavedViewsHandler) List(w http.ResponseWriter, r *http.Request) {
 				o := int(owner.Int64)
 				sv.Owner = &o
 			}
-			sv.UserCanChange = true
+			sv.UserCanChange = (user == nil || user.IsSuperuser || sv.Owner == nil || *sv.Owner == user.ID)
 			_ = json.Unmarshal([]byte(rulesJSON), &sv.FilterRules)
 			if sv.FilterRules == nil {
 				sv.FilterRules = []models.SavedViewFilterRule{}
@@ -50,6 +63,10 @@ func (h *SavedViewsHandler) List(w http.ResponseWriter, r *http.Request) {
 			results = append(results, sv)
 			allIDs = append(allIDs, sv.ID)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	if results == nil {
@@ -73,17 +90,27 @@ func (h *SavedViewsHandler) Create(w http.ResponseWriter, r *http.Request) {
 		SortField       string                       `json:"sort_field"`
 		SortReverse     bool                         `json:"sort_reverse"`
 		FilterRules     []models.SavedViewFilterRule `json:"filter_rules"`
+		Owner           *int                         `json:"owner"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
+	user := GetUserFromContext(r.Context())
+	var ownerID *int
+	if user != nil {
+		ownerID = &user.ID
+	}
+	if input.Owner != nil && user != nil && user.IsSuperuser {
+		ownerID = input.Owner
+	}
+
 	rulesJSON, _ := json.Marshal(input.FilterRules)
 	res, err := h.db.Exec(`
 		INSERT INTO saved_views (name, show_on_dashboard, show_in_sidebar, sort_field, sort_reverse, filter_rules, owner_id)
-		VALUES (?, ?, ?, ?, ?, ?, 1)
-	`, input.Name, input.ShowOnDashboard, input.ShowInSidebar, input.SortField, input.SortReverse, string(rulesJSON))
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, input.Name, input.ShowOnDashboard, input.ShowInSidebar, input.SortField, input.SortReverse, string(rulesJSON), ownerID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -98,6 +125,7 @@ func (h *SavedViewsHandler) Create(w http.ResponseWriter, r *http.Request) {
 		SortField:       input.SortField,
 		SortReverse:     input.SortReverse,
 		FilterRules:     input.FilterRules,
+		Owner:           ownerID,
 		UserCanChange:   true,
 	}
 
@@ -123,7 +151,16 @@ func (h *SavedViewsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		o := int(owner.Int64)
 		sv.Owner = &o
 	}
-	sv.UserCanChange = true
+
+	user := GetUserFromContext(r.Context())
+	if user != nil && !user.IsSuperuser && sv.Owner != nil && *sv.Owner != user.ID {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+	sv.UserCanChange = (user == nil || user.IsSuperuser || sv.Owner == nil || *sv.Owner == user.ID)
+
 	_ = json.Unmarshal([]byte(rulesJSON), &sv.FilterRules)
 	if sv.FilterRules == nil {
 		sv.FilterRules = []models.SavedViewFilterRule{}
@@ -133,9 +170,85 @@ func (h *SavedViewsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(sv)
 }
 
+func (h *SavedViewsHandler) Update(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	var existingOwner sql.NullInt64
+	err := h.db.QueryRow("SELECT owner_id FROM saved_views WHERE id = ?", id).Scan(&existingOwner)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	user := GetUserFromContext(r.Context())
+	if user != nil && !user.IsSuperuser && existingOwner.Valid && int(existingOwner.Int64) != user.ID {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
+	var input struct {
+		Name            *string                       `json:"name"`
+		ShowOnDashboard *bool                         `json:"show_on_dashboard"`
+		ShowInSidebar   *bool                         `json:"show_in_sidebar"`
+		SortField       *string                       `json:"sort_field"`
+		SortReverse     *bool                         `json:"sort_reverse"`
+		FilterRules     *[]models.SavedViewFilterRule `json:"filter_rules"`
+		Owner           *int                          `json:"owner"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if input.Name != nil {
+		_, _ = h.db.Exec("UPDATE saved_views SET name = ? WHERE id = ?", *input.Name, id)
+	}
+	if input.ShowOnDashboard != nil {
+		_, _ = h.db.Exec("UPDATE saved_views SET show_on_dashboard = ? WHERE id = ?", *input.ShowOnDashboard, id)
+	}
+	if input.ShowInSidebar != nil {
+		_, _ = h.db.Exec("UPDATE saved_views SET show_in_sidebar = ? WHERE id = ?", *input.ShowInSidebar, id)
+	}
+	if input.SortField != nil {
+		_, _ = h.db.Exec("UPDATE saved_views SET sort_field = ? WHERE id = ?", *input.SortField, id)
+	}
+	if input.SortReverse != nil {
+		_, _ = h.db.Exec("UPDATE saved_views SET sort_reverse = ? WHERE id = ?", *input.SortReverse, id)
+	}
+	if input.FilterRules != nil {
+		rulesJSON, _ := json.Marshal(*input.FilterRules)
+		_, _ = h.db.Exec("UPDATE saved_views SET filter_rules = ? WHERE id = ?", string(rulesJSON), id)
+	}
+	if input.Owner != nil && (user == nil || user.IsSuperuser || *input.Owner == user.ID) {
+		if *input.Owner == 0 {
+			_, _ = h.db.Exec("UPDATE saved_views SET owner_id = NULL WHERE id = ?", id)
+		} else {
+			_, _ = h.db.Exec("UPDATE saved_views SET owner_id = ? WHERE id = ?", *input.Owner, id)
+		}
+	}
+
+	h.Get(w, r)
+}
+
 func (h *SavedViewsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
-	_, err := h.db.Exec("DELETE FROM saved_views WHERE id = ?", id)
+	var existingOwner sql.NullInt64
+	err := h.db.QueryRow("SELECT owner_id FROM saved_views WHERE id = ?", id).Scan(&existingOwner)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	user := GetUserFromContext(r.Context())
+	if user != nil && !user.IsSuperuser && existingOwner.Valid && int(existingOwner.Int64) != user.ID {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
+	_, err = h.db.Exec("DELETE FROM saved_views WHERE id = ?", id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

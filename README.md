@@ -48,7 +48,16 @@ Serve o **frontend Angular oficial do Paperless-ngx** (100% idêntico em design,
    - Campos Personalizados (*Custom Fields*)
    - Tarefas em Segundo Plano (*Tasks*) com sincronização em tempo real via WebSocket (`/ws/status/`).
 
-5. **Segurança Rigorosa:**
+5. **Novas Funcionalidades Enterprise & Homelab:**
+   - **Motor de Workflows Nativo:** Triggers e ações automáticas na ingestão de documentos.
+   - **Autoclassificador Inteligente:** Machine Learning Naive Bayes em Go para atribuição automática de correspondentes, etiquetas e tipos de documento.
+   - **Digitalização de Rede eSCL / AirPrint (`/scan`):** Portal web para acionar scanners de rede sem drivers locais.
+   - **Partilha Pública de Documentos (`/share/{slug}`):** Links seguros com expiração e landing page de pré-visualização.
+   - **Autenticação TOTP / MFA:** Segurança reforçada para contas de utilizador.
+   - **Formatos Microsoft Office (DOCX, XLSX, PPTX):** Extração de texto embutida nativa.
+   - **Documentação Interativa Swagger UI & ReDoc:** Disponível em `/api/schema/swagger-ui/`.
+
+6. **Segurança Rigorosa:**
    - Hash de palavras-passe com **bcrypt**.
    - Suporte a tokens de autenticação (`Authorization: Token <key>`).
    - Sessões seguras com cookies HttpOnly e tokens CSRF (`csrftoken`).
@@ -93,28 +102,17 @@ paperless-go/
 │   └── server/
 │       └── main.go          # Ponto de entrada e ciclo de vida do servidor
 ├── internal/
-│   ├── api/                 # Endpoints REST e WebSocket (100% Paperless-ngx compatível)
-│   │   ├── handler_auth.go
-│   │   ├── handler_config.go
-│   │   ├── handler_correspondents.go
-│   │   ├── handler_custom_fields.go
-│   │   ├── handler_document_types.go
-│   │   ├── handler_documents.go
-│   │   ├── handler_saved_views.go
-│   │   ├── handler_statistics.go
-│   │   ├── handler_storage_paths.go
-│   │   ├── handler_tags.go
-│   │   ├── handler_tasks.go
-│   │   ├── handler_ui_settings.go
-│   │   ├── handler_websocket.go
-│   │   ├── middleware.go
-│   │   └── router.go
-│   ├── auth/                # Gestão de credenciais, bcrypt e tokens
+│   ├── api/                 # Endpoints REST, WebSocket, Scan, Share Links e Swagger
+│   ├── auth/                # Autenticação, bcrypt, tokens e TOTP (2FA)
+│   ├── classifier/          # Autoclassificador ML Naive Bayes
+│   ├── compress/            # Otimização e compressão de PDFs
 │   ├── config/              # Variáveis de ambiente e configuração
-│   ├── consumer/            # Ingestão, extração nativa de texto, miniaturas e watcher
+│   ├── consumer/            # Ingestão, PDF nativo, Office (DOCX/XLSX), miniaturas e watcher
 │   ├── database/            # SQLite com WAL, FTS5 e migrações automáticas
 │   ├── models/              # Estruturas de dados REST
-│   └── queue/               # Worker pool em memória (substituto de Celery + Redis)
+│   ├── queue/               # Worker pool em memória (substituto de Celery + Redis)
+│   ├── scanner/             # Cliente de digitalização eSCL / AirPrint
+│   └── workflow/            # Motor de execução de workflows e automações
 ├── web/
 │   └── static/              # Frontend oficial compilado do Paperless-ngx (v3.3.2)
 ├── Dockerfile               # Imagem Alpine multi-stage ultra-leve (~35MB)

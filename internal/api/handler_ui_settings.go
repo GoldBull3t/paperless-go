@@ -40,6 +40,22 @@ var AllPermissions = []string{
 	"documents.change_uisettings",
 	"documents.view_task",
 	"documents.change_task",
+	"documents.view_workflow",
+	"documents.change_workflow",
+	"documents.add_workflow",
+	"documents.delete_workflow",
+	"paperless.view_workflow",
+	"paperless.change_workflow",
+	"paperless.add_workflow",
+	"paperless.delete_workflow",
+	"paperless_mail.view_mailaccount",
+	"paperless_mail.view_mailrule",
+	"auth.view_user",
+	"auth.change_user",
+	"auth.add_user",
+	"auth.delete_user",
+	"auth.view_group",
+	"auth.change_group",
 }
 
 type UISettingsResponse struct {
@@ -61,10 +77,18 @@ func (h *UISettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	userID := 1
 	username := "admin"
 	isSuper := true
+	firstName := "Admin"
+	lastName := "User"
 	if user != nil {
 		userID = user.ID
 		username = user.Username
 		isSuper = user.IsSuperuser
+		if user.FirstName != "" {
+			firstName = user.FirstName
+		}
+		if user.LastName != "" {
+			lastName = user.LastName
+		}
 	}
 
 	var settingsJSON string
@@ -87,8 +111,8 @@ func (h *UISettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 			"username":     username,
 			"is_superuser": isSuper,
 			"is_staff":     true,
-			"first_name":   "Admin",
-			"last_name":    "User",
+			"first_name":   firstName,
+			"last_name":    lastName,
 		},
 	}
 
@@ -99,8 +123,20 @@ func (h *UISettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 func (h *UISettingsHandler) Post(w http.ResponseWriter, r *http.Request) {
 	user := GetUserFromContext(r.Context())
 	userID := 1
+	username := "admin"
+	isSuper := true
+	firstName := "Admin"
+	lastName := "User"
 	if user != nil {
 		userID = user.ID
+		username = user.Username
+		isSuper = user.IsSuperuser
+		if user.FirstName != "" {
+			firstName = user.FirstName
+		}
+		if user.LastName != "" {
+			lastName = user.LastName
+		}
 	}
 
 	var payload struct {
@@ -123,9 +159,11 @@ func (h *UISettingsHandler) Post(w http.ResponseWriter, r *http.Request) {
 		Permissions: AllPermissions,
 		User: map[string]interface{}{
 			"id":           userID,
-			"username":     "admin",
-			"is_superuser": true,
+			"username":     username,
+			"is_superuser": isSuper,
 			"is_staff":     true,
+			"first_name":   firstName,
+			"last_name":    lastName,
 		},
 	}
 

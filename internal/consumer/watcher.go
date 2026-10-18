@@ -1,6 +1,8 @@
 package consumer
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -57,30 +59,44 @@ func (w *Watcher) scanConsumeDir() {
 		}
 
 		filePath := filepath.Join(w.consumeDir, entry.Name())
-		// Ensure file has stabilized (not actively being copied)
 		info1, err := entry.Info()
-		if err != nil {
+		if err != nil || info1.Size() == 0 {
 			continue
-		}
-		time.Sleep(500 * time.Millisecond)
-		info2, err := os.Stat(filePath)
-		if err != nil || info1.Size() != info2.Size() {
-			continue // still being written
 		}
 
 		fileName := entry.Name()
-		log.Printf("[Watcher] Ingesting drop-in document: %s", fileName)
-
 		// Create a copy in temp folder for consumer to process safely
-		tmpPath := filepath.Join(os.TempDir(), "paperless-consume-"+fileName)
+		tmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("paperless-consume-%d-%s", time.Now().UnixNano(), fileName))
 		if err := copyFile(filePath, tmpPath); err != nil {
 			continue
 		}
-		_ = os.Remove(filePath) // Remove from consume folder once captured
+
+		// Remove from consume folder now that safe temporary copy is secured
+		_ = os.Remove(filePath)
+		log.Printf("[Watcher] Queued drop-in document: %s", fileName)
 
 		w.queue.Enqueue("Consume document", fileName, tmpPath, func(tid string) (int, error) {
 			defer os.Remove(tmpPath)
-			return w.consumer.ConsumeFile(tmpPath, fileName, nil)
+			docID, err := w.consumer.ConsumeFile(tmpPath, fileName, nil)
+			if err != nil {
+				var dupErr *ErrDuplicateDocument
+				if errors.As(err, &dupErr) {
+					// Duplicate detected: move to .duplicates/ or remove if configured
+					if os.Getenv("PAPERLESS_CONSUMER_DELETE_DUPLICATES") != "true" {
+						dupDir := filepath.Join(w.consumeDir, ".duplicates")
+						_ = os.MkdirAll(dupDir, 0755)
+						_ = copyFile(tmpPath, filepath.Join(dupDir, fileName))
+					}
+					return docID, err
+				}
+
+				// If other failure, preserve failed file in consume/.failed/ so user doesn't lose original
+				failedDir := filepath.Join(w.consumeDir, ".failed")
+				_ = os.MkdirAll(failedDir, 0755)
+				_ = copyFile(tmpPath, filepath.Join(failedDir, fileName))
+				return 0, err
+			}
+			return docID, nil
 		})
 	}
 }
