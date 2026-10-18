@@ -1,0 +1,23 @@
+# Binaries
+*.exe
+*.exe~
+paperless-go
+*.dll
+*.so
+*.dylib
+
+# Runtime Data & Storage
+/data/
+/media/
+/consume/*
+!/consume/.gitkeep
+
+# Environment & IDE
+.env
+.env.local
+.vscode/
+
+# Logs & Temp
+*.log
+*.tmp
+temp/

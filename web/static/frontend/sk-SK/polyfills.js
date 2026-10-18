@@ -1,0 +1,31 @@
+function s(t,e){for(let i=1,n=1;i<t.length;i++,n++)if(e[n]==="\\")n++;else if(t[i]===":")return i;throw new Error(`Unterminated $localize metadata block in "${e}".`)}var o=function(t,...e){if(o.translate){let n=o.translate(t,e);t=n[0],e=n[1]}let i=r(t[0],t.raw[0]);for(let n=1;n<t.length;n++)i+=e[n-1]+r(t[n],t.raw[n]);return i},l=":";function r(t,e){return e.charAt(0)===l?t.substring(s(t,e)+1):t}globalThis.$localize=o;(globalThis.$localize??={}).locale="sk-SK";
+/**
+ * @license
+ * Copyright Google LLC All Rights Reserved.
+ *
+ * Use of this source code is governed by an MIT-style license that can be
+ * found in the LICENSE file at https://angular.dev/license
+ */
+
+// THIS CODE IS GENERATED - DO NOT MODIFY.
+  (function(global) {
+    global.ng ??= {};
+    global.ng.common ??= {};
+    global.ng.common.locales ??= {};
+    const u = undefined;
+    function plural(val) {
+const n = val, i = Math.floor(Math.abs(val)), v = val.toString().replace(/^[^.]*\.?/, '').length;
+
+if (i === 1 && v === 0)
+    return 1;
+if (i === Math.floor(i) && (i >= 2 && i <= 4) && v === 0)
+    return 3;
+if (!(v === 0))
+    return 4;
+return 5;
+}
+    global.ng.common.locales['sk'] = ["sk",[["AM","PM"]],u,[["n","p","u","s","š","p","s"],["ne","po","ut","st","št","pi","so"],["nedeľa","pondelok","utorok","streda","štvrtok","piatok","sobota"],["ne","po","ut","st","št","pi","so"]],u,[["j","f","m","a","m","j","j","a","s","o","n","d"],["jan","feb","mar","apr","máj","jún","júl","aug","sep","okt","nov","dec"],["januára","februára","marca","apríla","mája","júna","júla","augusta","septembra","októbra","novembra","decembra"]],[["j","f","m","a","m","j","j","a","s","o","n","d"],["jan","feb","mar","apr","máj","jún","júl","aug","sep","okt","nov","dec"],["január","február","marec","apríl","máj","jún","júl","august","september","október","november","december"]],[["pred Kr.","po Kr."],u,["pred Kristom","po Kristovi"]],1,[6,0],["d. M. y",u,"d. MMMM y","EEEE d. MMMM y"],["H:mm","H:mm:ss","H:mm:ss z","H:mm:ss zzzz"],["{1} {0}","{1}, {0}",u,u],[","," ",";","%","+","-","e","×","‰","∞","NaN",":"],["#,##0.###","#,##0 %","#,##0.00 ¤","#E0"],"EUR","€","euro",{"AUD":[u,"$"],"BRL":[u,"R$"],"BYN":[u,"р."],"CAD":[u,"$"],"CNY":[u,"¥"],"GBP":[u,"£"],"HKD":[u,"$"],"ILS":["NIS","₪"],"INR":[u,"₹"],"JPY":[u,"¥"],"KRW":[u,"₩"],"NZD":[u,"$"],"PHP":[u,"₱"],"RUR":[u,"р."],"TWD":[u,"NT$"],"USD":[u,"$"],"VND":[u,"₫"],"XXX":[]},"ltr", plural, [[["o poln.","nap.","ráno","dop.","pop.","več.","v n."],["o poln.","napol.","ráno","dopol.","popol.","večer","v noci"],["o polnoci","napoludnie","ráno","dopoludnia","popoludní","večer","v noci"]],[["poln.","pol.","ráno","dop.","pop.","več.","noc"],["poln.","pol.","ráno","dopol.","popol.","večer","noc"],["polnoc","poludnie","ráno","dopoludnie","popoludnie","večer","noc"]],["00:00","12:00",["04:00","09:00"],["09:00","12:00"],["12:00","18:00"],["18:00","22:00"],["22:00","04:00"]]]];
+  })(globalThis);
+    
+;;
+/**i18n:fa3d7e19b336ec75*/

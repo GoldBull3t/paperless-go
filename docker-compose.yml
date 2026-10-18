@@ -1,0 +1,18 @@
+services:
+  paperless-go:
+    build: .
+    image: paperless-go:latest
+    container_name: paperless-go
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PAPERLESS_PORT=8000
+      - PAPERLESS_SECRET_KEY=change-this-to-a-secure-random-key
+      - PAPERLESS_DEFAULT_LANGUAGE=pt-PT # or en-US
+      - PAPERLESS_OCR_WORKERS=1
+    volumes:
+      - ./data:/app/data
+      - ./media:/app/media
+      - ./consume:/app/consume
+
