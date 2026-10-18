@@ -1,0 +1,27 @@
+# Git and docs
+.git/
+.github/
+.gitignore
+.dockerignore
+*.md
+
+# Binaries and temp
+*.exe
+*.exe~
+paperless-go
+paperless-go-linux
+*.dll
+*.so
+*.dylib
+*.log
+*.tmp
+temp/
+
+# Runtime directories
+data/
+media/
+consume/
+
+# IDE
+.vscode/
+.idea/
