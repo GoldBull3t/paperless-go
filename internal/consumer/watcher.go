@@ -64,6 +64,16 @@ func (w *Watcher) scanConsumeDir() {
 			continue
 		}
 
+		// Ensure file has finished being written by checking size and mod time stability
+		initialSize := info1.Size()
+		initialMod := info1.ModTime()
+		time.Sleep(500 * time.Millisecond)
+		info2, err := os.Stat(filePath)
+		if err != nil || info2.Size() != initialSize || !info2.ModTime().Equal(initialMod) {
+			// File is still being actively written, will pick it up on next tick
+			continue
+		}
+
 		fileName := entry.Name()
 		// Create a copy in temp folder for consumer to process safely
 		tmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("paperless-consume-%d-%s", time.Now().UnixNano(), fileName))

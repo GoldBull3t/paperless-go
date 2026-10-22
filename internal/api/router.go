@@ -34,10 +34,35 @@ func NewRouter(
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	r.Use(SecurityHeadersMiddleware)
 
-	// CORS configuration for local apps, mobile apps, and extensions
+	// Secure CORS configuration
+	var allowedOrigins []string
+	if cfg.CorsAllowedHosts != "" {
+		for _, host := range strings.Split(cfg.CorsAllowedHosts, ",") {
+			if h := strings.TrimSpace(host); h != "" {
+				allowedOrigins = append(allowedOrigins, h)
+			}
+		}
+	}
+
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
+		AllowedOrigins: allowedOrigins,
+		AllowOriginFunc: func(r *http.Request, origin string) bool {
+			if len(allowedOrigins) == 0 {
+				// By default, allow same-origin and local network clients
+				if origin == "" || strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1") || strings.HasPrefix(origin, "https://localhost") {
+					return true
+				}
+				return false
+			}
+			for _, o := range allowedOrigins {
+				if o == "*" || o == origin {
+					return true
+				}
+			}
+			return false
+		},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRFToken"},
 		ExposedHeaders:   []string{"Link", "Content-Disposition"},
@@ -46,6 +71,7 @@ func NewRouter(
 	}))
 
 	r.Use(AuthMiddleware(authSvc))
+	r.Use(CSRFMiddleware)
 
 	// Initialize handlers
 	authH := NewAuthHandler(db, authSvc)
@@ -295,6 +321,17 @@ func NewRouter(
 	r.HandleFunc("/{lang:[a-z]{2}-[A-Z]{2}}/ws/status/", wsHub.HandleWS)
 	r.HandleFunc("/{lang:[a-z]{2}-[A-Z]{2}}/ws/", wsHub.HandleWS)
 
+	// Intercept legacy Django admin routes and redirect to home (no Django in paperless-go)
+	adminRedirect := func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/", http.StatusFound)
+	}
+	r.HandleFunc("/admin", adminRedirect)
+	r.HandleFunc("/admin/", adminRedirect)
+	r.HandleFunc("/admin/*", adminRedirect)
+	r.HandleFunc("/{lang:[a-z]{2}-[A-Z]{2}}/admin", adminRedirect)
+	r.HandleFunc("/{lang:[a-z]{2}-[A-Z]{2}}/admin/", adminRedirect)
+	r.HandleFunc("/{lang:[a-z]{2}-[A-Z]{2}}/admin/*", adminRedirect)
+
 	// Authentication forms / redirects
 	r.HandleFunc("/accounts/login/", authH.LoginPage)
 	r.HandleFunc("/accounts/logout/", authH.Logout)
@@ -318,10 +355,14 @@ func NewRouter(
 
 		relPath := chi.URLParam(r, "*")
 		if relPath != "" {
-			targetFile := filepath.Join(langPath, relPath)
-			if info, err := os.Stat(targetFile); err == nil && !info.IsDir() {
-				http.ServeFile(w, r, targetFile)
-				return
+			cleanRel := filepath.Clean("/" + relPath)
+			targetFile := filepath.Join(langPath, cleanRel)
+			cleanLang := filepath.Clean(langPath)
+			if strings.HasPrefix(filepath.Clean(targetFile), cleanLang) {
+				if info, err := os.Stat(targetFile); err == nil && !info.IsDir() {
+					http.ServeFile(w, r, targetFile)
+					return
+				}
 			}
 		}
 

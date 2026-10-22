@@ -20,6 +20,7 @@ type Config struct {
 	AutoTagging     bool
 	DefaultLanguage string
 	AutoLogin       bool
+	CorsAllowedHosts string
 }
 
 func Load() *Config {
@@ -51,22 +52,24 @@ func Load() *Config {
 	ocrMode := getEnv("PAPERLESS_OCR_MODE", "auto")
 	ocrWorkers := getEnvInt("PAPERLESS_OCR_WORKERS", 1)
 	defaultLang := getEnv("PAPERLESS_DEFAULT_LANGUAGE", "en-US")
-	autoLogin := getEnv("PAPERLESS_AUTO_LOGIN", "true") == "true"
+	autoLogin := getEnv("PAPERLESS_AUTO_LOGIN", "false") == "true"
+	corsAllowed := getEnv("PAPERLESS_CORS_ALLOWED_HOSTS", "")
 
 	return &Config{
-		Host:            host,
-		Port:            port,
-		DataDir:         dataDir,
-		MediaDir:        mediaDir,
-		ConsumeDir:      consumeDir,
-		StaticDir:       staticDir,
-		DatabasePath:    dbPath,
-		SecretKey:       secret,
-		OCRMode:         ocrMode,
-		OCRWorkerCount:  ocrWorkers,
-		AutoTagging:     getEnv("PAPERLESS_AUTO_TAGGING", "true") == "true",
-		DefaultLanguage: defaultLang,
-		AutoLogin:       autoLogin,
+		Host:             host,
+		Port:             port,
+		DataDir:          dataDir,
+		MediaDir:         mediaDir,
+		ConsumeDir:       consumeDir,
+		StaticDir:        staticDir,
+		DatabasePath:     dbPath,
+		SecretKey:        secret,
+		OCRMode:          ocrMode,
+		OCRWorkerCount:   ocrWorkers,
+		AutoTagging:      getEnv("PAPERLESS_AUTO_TAGGING", "true") == "true",
+		DefaultLanguage:  defaultLang,
+		AutoLogin:        autoLogin,
+		CorsAllowedHosts: corsAllowed,
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"paperless-go/internal/compress"
 	"paperless-go/internal/database"
 	"paperless-go/internal/models"
 )
@@ -99,6 +100,7 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 					if archFile.Valid {
 						doc.ArchivedFileName = &archFile.String
 					}
+					doc.Content = compress.DecompressText(doc.Content)
 					if len(doc.Content) > 100 {
 						doc.Content = doc.Content[:100] + "..."
 					}

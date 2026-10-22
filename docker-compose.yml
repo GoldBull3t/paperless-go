@@ -9,6 +9,7 @@ services:
     environment:
       - PAPERLESS_PORT=8000
       - PAPERLESS_SECRET_KEY=change-this-to-a-secure-random-key
+      - PAPERLESS_AUTO_LOGIN=false
       - PAPERLESS_DEFAULT_LANGUAGE=pt-PT # or en-US
       - PAPERLESS_OCR_WORKERS=1
     volumes:

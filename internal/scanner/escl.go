@@ -42,7 +42,7 @@ func NewESCLClient() *ESCLClient {
 	}
 }
 
-// CleanBaseURL ensures the eSCL URL ends without trailing slashes
+// CleanBaseURL ensures the eSCL URL ends without trailing slashes and validates the scheme
 func CleanBaseURL(rawURL string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
@@ -50,6 +50,12 @@ func CleanBaseURL(rawURL string) (string, error) {
 	}
 	if u.Scheme == "" {
 		u.Scheme = "http"
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("invalid scheme: only http and https are allowed")
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("invalid host")
 	}
 	base := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
 	path := strings.TrimRight(u.Path, "/")

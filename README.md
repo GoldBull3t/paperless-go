@@ -58,10 +58,15 @@ Serve o **frontend Angular oficial do Paperless-ngx** (100% idêntico em design,
    - **Documentação Interativa Swagger UI & ReDoc:** Disponível em `/api/schema/swagger-ui/`.
 
 6. **Segurança Rigorosa:**
-   - Hash de palavras-passe com **bcrypt**.
-   - Suporte a tokens de autenticação (`Authorization: Token <key>`).
-   - Sessões seguras com cookies HttpOnly e tokens CSRF (`csrftoken`).
-   - Isolamento de ficheiros e prevenção contra *path traversal*.
+   - Autenticação obrigatória por omissão (`PAPERLESS_AUTO_LOGIN=false`).
+   - Hash de palavras-passe com **bcrypt** e mitigação de enumeração de utilizadores via timing em tempo constante.
+   - **Autenticação de Dois Fatores (TOTP / 2FA)** real e verificada em `/accounts/login/` e na API REST, com suporte a códigos de recuperação de uso único.
+   - Proteção contra ataques de força bruta com **Rate Limiting** em memória no login.
+   - Proteção ativa contra **CSRF** com validação de `X-CSRFToken` para sessões web baseadas em cookies.
+   - Cookies seguros com atributos `HttpOnly`, `SameSite=Lax` e `Secure` automático sob HTTPS.
+   - Prevenção rigorosa contra **Path Traversal** e validação estrita de extensões e caminhos de ficheiros.
+   - Proteção contra **Open Redirect** no parâmetro `next`.
+   - Cabeçalhos de segurança HTTP modernos injetados em todas as respostas (`nosniff`, `SAMEORIGIN`, etc.).
 
 ---
 

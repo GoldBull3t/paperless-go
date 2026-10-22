@@ -353,6 +353,21 @@ func formatFileSize(bytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
+func sanitizeShareExt(name string) string {
+	ext := strings.ToLower(filepath.Ext(name))
+	var sb strings.Builder
+	for _, r := range ext {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.' {
+			sb.WriteRune(r)
+		}
+	}
+	res := sb.String()
+	if len(res) > 10 || !strings.HasPrefix(res, ".") {
+		return ".pdf"
+	}
+	return res
+}
+
 // PublicAccess streams the shared document or renders an elegant landing page for browser visits
 func (h *ShareLinksHandler) PublicAccess(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
@@ -414,8 +429,9 @@ func (h *ShareLinksHandler) PublicAccess(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	ext := strings.ToLower(filepath.Ext(origName))
-	origPath := filepath.Join(h.cfg.MediaDir, "documents", "originals", fmt.Sprintf("%07d%s", docID, ext))
+	cleanMedia := filepath.Clean(h.cfg.MediaDir)
+	ext := sanitizeShareExt(origName)
+	origPath := filepath.Join(cleanMedia, "documents", "originals", fmt.Sprintf("%07d%s", docID, ext))
 
 	targetPath := origPath
 	targetMime := "application/octet-stream"
@@ -425,12 +441,19 @@ func (h *ShareLinksHandler) PublicAccess(w http.ResponseWriter, r *http.Request)
 	downloadName := origName
 
 	if (fileFormat == "archive" || strings.ToLower(fileFormat) == "pdf") && archName != nil && *archName != "" {
-		archPath := filepath.Join(h.cfg.MediaDir, "documents", "archive", fmt.Sprintf("%07d.pdf", docID))
-		if _, err := os.Stat(archPath); err == nil {
-			targetPath = archPath
-			targetMime = "application/pdf"
-			downloadName = title + ".pdf"
+		archPath := filepath.Join(cleanMedia, "documents", "archive", fmt.Sprintf("%07d.pdf", docID))
+		if strings.HasPrefix(filepath.Clean(archPath), cleanMedia) {
+			if _, err := os.Stat(archPath); err == nil {
+				targetPath = archPath
+				targetMime = "application/pdf"
+				downloadName = title + ".pdf"
+			}
 		}
+	}
+
+	if !strings.HasPrefix(filepath.Clean(targetPath), cleanMedia) {
+		http.NotFound(w, r)
+		return
 	}
 
 	info, err := os.Stat(targetPath)

@@ -187,23 +187,12 @@ CREATE TABLE IF NOT EXISTS mail_rules (
 
 CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
     title,
-    content,
-    content='documents',
-    content_rowid='id'
+    content
 );
 
 -- Triggers for FTS5 synchronization
-CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
-    INSERT INTO documents_fts(rowid, title, content) VALUES (new.id, new.title, new.content);
-END;
-
 CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
-    INSERT INTO documents_fts(documents_fts, rowid, title, content) VALUES('delete', old.id, old.title, old.content);
-END;
-
-CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
-    INSERT INTO documents_fts(documents_fts, rowid, title, content) VALUES('delete', old.id, old.title, old.content);
-    INSERT INTO documents_fts(rowid, title, content) VALUES (new.id, new.title, new.content);
+    DELETE FROM documents_fts WHERE rowid = old.id;
 END;
 
 CREATE INDEX IF NOT EXISTS idx_documents_created ON documents(created);

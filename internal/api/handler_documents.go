@@ -607,6 +607,7 @@ func (h *DocumentsHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	if input.Title != nil {
 		_, _ = h.db.Exec("UPDATE documents SET title = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *input.Title, id)
+		_, _ = h.db.Exec("UPDATE documents_fts SET title = ? WHERE rowid = ?", *input.Title, id)
 	}
 	if input.Correspondent != nil {
 		_, _ = h.db.Exec("UPDATE documents SET correspondent_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *input.Correspondent, id)
@@ -843,7 +844,9 @@ func (h *DocumentsHandler) Chat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *DocumentsHandler) PostDocument(w http.ResponseWriter, r *http.Request) {
-	err := r.ParseMultipartForm(50 << 20) // 50MB max
+	// Guard against unconstrained memory/disk exhaustion
+	r.Body = http.MaxBytesReader(w, r.Body, 500<<20)
+	err := r.ParseMultipartForm(50 << 20) // 50MB max in RAM
 	if err != nil {
 		http.Error(w, "Failed to parse form: "+err.Error(), http.StatusBadRequest)
 		return
@@ -1546,7 +1549,9 @@ func (h *DocumentsHandler) BulkEdit(w http.ResponseWriter, r *http.Request) {
 			if err == nil {
 				text, _ := consumer.ExtractText(filePath, mimeType)
 				if text != "" {
-					_, _ = h.db.Exec("UPDATE documents SET content = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", text, id)
+					compressed := compress.CompressText(text)
+					_, _ = h.db.Exec("UPDATE documents SET content = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", compressed, id)
+					_, _ = h.db.Exec("INSERT OR REPLACE INTO documents_fts (rowid, title, content) VALUES (?, (SELECT title FROM documents WHERE id = ?), ?)", id, id, text)
 				}
 				thumbPath := filepath.Join(h.cfg.MediaDir, "documents", "thumbnails", fmt.Sprintf("%07d.png", id))
 				_ = consumer.GenerateThumbnail(filePath, thumbPath, mimeType)
@@ -1810,6 +1815,21 @@ func (h *DocumentsHandler) getDocCustomFields(docID int) []models.DocumentCustom
 	return cfs
 }
 
+func sanitizeFileExt(name string) string {
+	ext := strings.ToLower(filepath.Ext(name))
+	var sb strings.Builder
+	for _, r := range ext {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.' {
+			sb.WriteRune(r)
+		}
+	}
+	res := sb.String()
+	if len(res) > 10 || !strings.HasPrefix(res, ".") {
+		return ".pdf"
+	}
+	return res
+}
+
 func (h *DocumentsHandler) getBestFilePath(docID int, forceOriginal bool) (string, string, error) {
 	var origName, mimeType string
 	var archFileName sql.NullString
@@ -1818,15 +1838,23 @@ func (h *DocumentsHandler) getBestFilePath(docID int, forceOriginal bool) (strin
 		return "", "", err
 	}
 
+	cleanMedia := filepath.Clean(h.cfg.MediaDir)
+
 	if !forceOriginal && archFileName.Valid && archFileName.String != "" {
-		archivePath := filepath.Join(h.cfg.MediaDir, "documents", "archive", archFileName.String)
-		if _, err := os.Stat(archivePath); err == nil {
-			return archivePath, "application/pdf", nil
+		cleanArch := filepath.Base(archFileName.String)
+		archivePath := filepath.Join(cleanMedia, "documents", "archive", cleanArch)
+		if strings.HasPrefix(filepath.Clean(archivePath), cleanMedia) {
+			if _, err := os.Stat(archivePath); err == nil {
+				return archivePath, "application/pdf", nil
+			}
 		}
 	}
 
-	ext := filepath.Ext(origName)
-	path := filepath.Join(h.cfg.MediaDir, "documents", "originals", fmt.Sprintf("%07d%s", docID, ext))
+	ext := sanitizeFileExt(origName)
+	path := filepath.Join(cleanMedia, "documents", "originals", fmt.Sprintf("%07d%s", docID, ext))
+	if !strings.HasPrefix(filepath.Clean(path), cleanMedia) {
+		return "", "", fmt.Errorf("invalid file path")
+	}
 	return path, mimeType, nil
 }
 
@@ -1836,7 +1864,11 @@ func (h *DocumentsHandler) getOriginalFilePath(docID int) (string, string, error
 	if err != nil {
 		return "", "", err
 	}
-	ext := filepath.Ext(origName)
-	path := filepath.Join(h.cfg.MediaDir, "documents", "originals", fmt.Sprintf("%07d%s", docID, ext))
+	cleanMedia := filepath.Clean(h.cfg.MediaDir)
+	ext := sanitizeFileExt(origName)
+	path := filepath.Join(cleanMedia, "documents", "originals", fmt.Sprintf("%07d%s", docID, ext))
+	if !strings.HasPrefix(filepath.Clean(path), cleanMedia) {
+		return "", "", fmt.Errorf("invalid file path")
+	}
 	return path, mimeType, nil
 }
