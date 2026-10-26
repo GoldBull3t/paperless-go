@@ -1,9 +1,11 @@
 # syntax=docker/dockerfile:1
 
 # ---------------------------------------------------------------------
-# Stage 1: Build stage (Go static binary)
+# Stage 1: Build stage (Native Go cross-compilation - Ultra-Fast, No QEMU lag)
 # ---------------------------------------------------------------------
-FROM golang:alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:alpine AS builder
+
+ARG TARGETOS TARGETARCH
 
 WORKDIR /app
 
@@ -11,9 +13,12 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source and compile static binary
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o paperless-go ./cmd/server
+# Copy only Go source code (avoid copying 300MB web/ assets into builder)
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+
+# Native Go cross-compilation (compiles ARM64 & AMD64 in seconds instead of 15m in QEMU)
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w" -o paperless-go ./cmd/server
 
 # ---------------------------------------------------------------------
 # Stage 2: Final minimal runtime stage
