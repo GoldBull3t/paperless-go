@@ -310,6 +310,10 @@ func NewRouter(
 				r.Post("/scan/", scanH.TriggerScan)
 			})
 
+			// System Integrity & Online Zero-Downtime Backup
+			r.Get("/system/integrity/", docsH.SystemIntegrityCheck)
+			r.Get("/system/backup/", docsH.SystemBackup)
+
 			// OpenAPI Schema & Interactive Documentation (Swagger UI & ReDoc)
 			r.Get("/schema/", schemaH.GetSchema)
 			r.Get("/schema/swagger-ui/", schemaH.SwaggerUI)

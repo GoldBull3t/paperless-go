@@ -61,16 +61,16 @@ Serve o **frontend Angular oficial do Paperless-ngx** (100% idêntico em design,
    - **Formatos Microsoft Office (DOCX, XLSX, PPTX):** Extração de texto embutida nativa sem necessidade de Gotenberg.
    - **Documentação Interativa Swagger UI & ReDoc:** Disponível em `/api/schema/swagger-ui/`.
 
-6. **Segurança Rigorosa:**
-   - Autenticação obrigatória por omissão (`PAPERLESS_AUTO_LOGIN=false`).
-   - Hash de palavras-passe com **bcrypt** e mitigação de enumeração de utilizadores via timing em tempo constante.
-   - **Autenticação de Dois Fatores (TOTP / 2FA)** real e verificada em `/accounts/login/` e na API REST, com suporte a códigos de recuperação de uso único.
-   - Proteção contra ataques de força bruta com **Rate Limiting** em memória no login.
-   - Proteção ativa contra **CSRF** com validação de `X-CSRFToken` para sessões web baseadas em cookies.
-   - Cookies seguros com atributos `HttpOnly`, `SameSite=Lax` e `Secure` automático sob HTTPS.
-   - Prevenção rigorosa contra **Path Traversal** e validação estrita de extensões e caminhos de ficheiros.
-   - Proteção contra **Open Redirect** no parâmetro `next`.
-   - Cabeçalhos de segurança HTTP modernos injetados em todas as respostas (`nosniff`, `SAMEORIGIN`, etc.).
+6. **Segurança Rigorosa & Blindagem de Dados Sensíveis:**
+   - **Gravações Atómicas com `fsync`:** Prevenção total contra ficheiros corrompidos ou incompletos provocados por falhas de energia ou crashes a meio de uploads.
+   - **Transações ACID:** Ingestão atómica com Rollback automático. Zero documentos "fantasma" ou órfãos na base de dados.
+   - **Autoverificação de Integridade SQLite (`PRAGMA quick_check`):** Deteção e bloqueio preventivo de corrupção de base de dados no arranque.
+   - **Deteção de Corrupção Silenciosa (*Silent Bit Rot*):** Verificação ativa de hash SHA-256 no download e endpoint de auditoria global (`/api/system/integrity/`).
+   - **Trituração Criptográfica de Ficheiros (*Secure Shredding*):** Eliminação definitiva com sobrescrita de dados (`zero-fill`/bytes aleatórios) antes da remoção, impedindo recuperação forense de documentos confidenciais.
+   - **Encriptação em Repouso Opcional (AES-256-GCM):** Ficheiros encriptados em disco via `PAPERLESS_ENCRYPTION_AT_REST=true` com derivação de chave SHA-256.
+   - **Backups Atómicos Online Zero-Downtime (`/api/system/backup/`):** Exportação atómica consistente através do motor `VACUUM INTO` do SQLite num arquivo ZIP descarregável.
+   - **Autenticação de Dois Fatores (TOTP / 2FA):** Suporte nativo a códigos de aplicação e recuperação descartáveis.
+   - **Proteção Ativa contra Ataques:** Rate limiting contra força bruta no login, CSRF tokens ativos, cookies `SameSite=Lax`, prevenção contra *Path Traversal* e *Open Redirect*.
 
 ---
 

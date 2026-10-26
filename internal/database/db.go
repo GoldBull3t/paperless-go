@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
 
 	_ "modernc.org/sqlite"
 )
@@ -28,12 +29,29 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
+	// Verify SQLite database integrity on startup (Crash-Proof Guarantee)
+	var checkResult string
+	if err := db.QueryRow("PRAGMA quick_check(10)").Scan(&checkResult); err != nil {
+		return nil, fmt.Errorf("database integrity verification failed: %w", err)
+	}
+	if checkResult != "ok" {
+		return nil, fmt.Errorf("CRITICAL: SQLite database corruption detected: %s", checkResult)
+	}
+
 	wrapped := &DB{DB: db}
 	if err := wrapped.migrate(); err != nil {
 		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
 
 	return wrapped, nil
+}
+
+// BackupTo creates a frozen, 100% consistent online backup using SQLite's VACUUM INTO,
+// safely capturing database state with zero downtime and no transaction lock contention.
+func (db *DB) BackupTo(dstPath string) error {
+	_ = os.Remove(dstPath)
+	_, err := db.Exec("VACUUM INTO ?", dstPath)
+	return err
 }
 
 func (db *DB) migrate() error {

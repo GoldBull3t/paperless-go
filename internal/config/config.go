@@ -32,6 +32,10 @@ type Config struct {
 	AIEmbeddingModel   string
 	AIExtractOnConsume bool
 
+	// Security & Integrity Configuration
+	EncryptionAtRest bool
+	EncryptionKey    string
+
 	// OIDC / SSO Configuration (4. A)
 	OIDCEnabled      bool
 	OIDCProviderName string
@@ -89,6 +93,10 @@ func Load() *Config {
 	aiEmbModel := getEnv("PAPERLESS_AI_EMBEDDING_MODEL", "")
 	aiExtractOnConsume := getEnv("PAPERLESS_AI_EXTRACT_ON_CONSUME", "true") == "true"
 
+	// Security & Encryption
+	encAtRest := getEnv("PAPERLESS_ENCRYPTION_AT_REST", "false") == "true"
+	encKey := getEnv("PAPERLESS_ENCRYPTION_KEY", secret)
+
 	// OIDC Defaults & envs
 	oidcClientID := getEnv("PAPERLESS_OIDC_CLIENT_ID", "")
 	oidcEnabled := getEnv("PAPERLESS_OIDC_ENABLED", "false") == "true" || oidcClientID != ""
@@ -116,6 +124,8 @@ func Load() *Config {
 		DefaultLanguage:    defaultLang,
 		AutoLogin:          autoLogin,
 		CorsAllowedHosts:   corsAllowed,
+		EncryptionAtRest:   encAtRest,
+		EncryptionKey:      encKey,
 		AIEnabled:          aiEnabled,
 		AIProvider:         aiProvider,
 		AIAPIURL:           aiURL,

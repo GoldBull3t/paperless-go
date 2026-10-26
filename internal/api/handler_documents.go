@@ -19,6 +19,7 @@ import (
 	"paperless-go/internal/compress"
 	"paperless-go/internal/config"
 	"paperless-go/internal/consumer"
+	"paperless-go/internal/crypto"
 	"paperless-go/internal/database"
 	"paperless-go/internal/models"
 	"paperless-go/internal/queue"
@@ -1200,9 +1201,16 @@ func (h *DocumentsHandler) Preview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	stream, err := crypto.OpenDecryptedStream(filePath, h.cfg.EncryptionKey)
+	if err != nil {
+		http.Error(w, "Error accessing document: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer stream.Close()
+
 	w.Header().Set("Content-Type", mimeType)
 	w.Header().Set("Content-Disposition", "inline")
-	http.ServeFile(w, r, filePath)
+	_, _ = io.Copy(w, stream)
 }
 
 func (h *DocumentsHandler) Download(w http.ResponseWriter, r *http.Request) {
@@ -1225,12 +1233,30 @@ func (h *DocumentsHandler) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var origName string
-	_ = h.db.QueryRow("SELECT original_filename FROM documents WHERE id = ?", id).Scan(&origName)
+	var origName, checksum string
+	_ = h.db.QueryRow("SELECT original_filename, checksum FROM documents WHERE id = ?", id).Scan(&origName, &checksum)
+
+	// Bit Rot / Integrity Guard: Verify SHA-256 integrity on download
+	valid, err := crypto.VerifyFileIntegrity(filePath, checksum, h.cfg.EncryptionKey)
+	if err == nil && !valid {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "CRITICAL: Silent file corruption detected! The file checksum does not match the database signature.",
+		})
+		return
+	}
+
+	stream, err := crypto.OpenDecryptedStream(filePath, h.cfg.EncryptionKey)
+	if err != nil {
+		http.Error(w, "Error accessing document: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer stream.Close()
 
 	w.Header().Set("Content-Type", mimeType)
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, origName))
-	http.ServeFile(w, r, filePath)
+	_, _ = io.Copy(w, stream)
 }
 
 func (h *DocumentsHandler) Thumb(w http.ResponseWriter, r *http.Request) {
@@ -1857,9 +1883,10 @@ func (h *DocumentsHandler) TrashAction(w http.ResponseWriter, r *http.Request) {
 			var origName string
 			_ = h.db.QueryRow("SELECT original_filename FROM documents WHERE id = ?", id).Scan(&origName)
 			ext := filepath.Ext(origName)
-			_ = os.Remove(filepath.Join(h.cfg.MediaDir, "documents", "originals", fmt.Sprintf("%07d%s", id, ext)))
-			_ = os.Remove(filepath.Join(h.cfg.MediaDir, "documents", "archive", fmt.Sprintf("%07d.pdf", id)))
-			_ = os.Remove(filepath.Join(h.cfg.MediaDir, "documents", "thumbnails", fmt.Sprintf("%07d.png", id)))
+			// Cryptographic secure shredding of confidential files before unlinking
+			_ = crypto.ShredFile(filepath.Join(h.cfg.MediaDir, "documents", "originals", fmt.Sprintf("%07d%s", id, ext)))
+			_ = crypto.ShredFile(filepath.Join(h.cfg.MediaDir, "documents", "archive", fmt.Sprintf("%07d.pdf", id)))
+			_ = crypto.ShredFile(filepath.Join(h.cfg.MediaDir, "documents", "thumbnails", fmt.Sprintf("%07d.png", id)))
 			_, _ = h.db.Exec("DELETE FROM documents WHERE id = ?", id)
 		}
 	}
@@ -2055,4 +2082,148 @@ func (h *DocumentsHandler) getOriginalFilePath(docID int) (string, string, error
 		return "", "", fmt.Errorf("invalid file path")
 	}
 	return path, mimeType, nil
+}
+
+// SystemIntegrityCheck scans all stored documents to detect bit-rot, missing files or silent disk corruption
+func (h *DocumentsHandler) SystemIntegrityCheck(w http.ResponseWriter, r *http.Request) {
+	rows, err := h.db.Query("SELECT id, title, original_filename, checksum FROM documents WHERE deleted_at IS NULL ORDER BY id ASC")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	type IntegrityDetail struct {
+		DocumentID int    `json:"document_id"`
+		Title      string `json:"title"`
+		FileName   string `json:"file_name"`
+		Status     string `json:"status"` // "OK", "CORRUPTED", "MISSING"
+		Detail     string `json:"detail,omitempty"`
+	}
+
+	var results []IntegrityDetail
+	totalChecked := 0
+	corruptedCount := 0
+	missingCount := 0
+
+	for rows.Next() {
+		var id int
+		var title, origName, checksum string
+		if err := rows.Scan(&id, &title, &origName, &checksum); err != nil {
+			continue
+		}
+		totalChecked++
+
+		filePath, _, err := h.getOriginalFilePath(id)
+		if err != nil || filePath == "" {
+			missingCount++
+			results = append(results, IntegrityDetail{
+				DocumentID: id,
+				Title:      title,
+				FileName:   origName,
+				Status:     "MISSING",
+				Detail:     "Original file not found on disk",
+			})
+			continue
+		}
+
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			missingCount++
+			results = append(results, IntegrityDetail{
+				DocumentID: id,
+				Title:      title,
+				FileName:   origName,
+				Status:     "MISSING",
+				Detail:     "File missing from originals directory",
+			})
+			continue
+		}
+
+		valid, err := crypto.VerifyFileIntegrity(filePath, checksum, h.cfg.EncryptionKey)
+		if err != nil || !valid {
+			corruptedCount++
+			results = append(results, IntegrityDetail{
+				DocumentID: id,
+				Title:      title,
+				FileName:   origName,
+				Status:     "CORRUPTED",
+				Detail:     "Checksum verification failed (potential bit rot or unauthorized tampering)",
+			})
+		} else {
+			results = append(results, IntegrityDetail{
+				DocumentID: id,
+				Title:      title,
+				FileName:   origName,
+				Status:     "OK",
+			})
+		}
+	}
+
+	resp := map[string]interface{}{
+		"healthy":         corruptedCount == 0 && missingCount == 0,
+		"total_checked":   totalChecked,
+		"corrupted_count": corruptedCount,
+		"missing_count":   missingCount,
+		"results":         results,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// SystemBackup creates a frozen atomic snapshot of SQLite WAL and streams a zip archive
+func (h *DocumentsHandler) SystemBackup(w http.ResponseWriter, r *http.Request) {
+	user := GetUserFromContext(r.Context())
+	if user != nil && !user.IsSuperuser {
+		http.Error(w, `{"detail": "Only superusers can initiate system backups"}`, http.StatusForbidden)
+		return
+	}
+
+	tmpSnapshot, err := os.CreateTemp("", "paperless-snapshot-*.db")
+	if err != nil {
+		http.Error(w, "Failed to create temporary backup file: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	snapshotPath := tmpSnapshot.Name()
+	_ = tmpSnapshot.Close()
+	defer os.Remove(snapshotPath)
+
+	// Perform SQLite online backup using VACUUM INTO (guaranteed 100% atomic & consistent)
+	if err := h.db.BackupTo(snapshotPath); err != nil {
+		http.Error(w, "SQLite online backup failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	nowStr := time.Now().Format("2006-01-02-150405")
+	backupFileName := fmt.Sprintf("paperless-backup-%s.zip", nowStr)
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, backupFileName))
+
+	zipWriter := zip.NewWriter(w)
+	defer zipWriter.Close()
+
+	// 1. Add database snapshot to zip
+	dbFile, err := os.Open(snapshotPath)
+	if err == nil {
+		if entryWriter, err := zipWriter.Create("paperless.db"); err == nil {
+			_, _ = io.Copy(entryWriter, dbFile)
+		}
+		_ = dbFile.Close()
+	}
+
+	// 2. Add originals directory
+	originalsDir := filepath.Join(h.cfg.MediaDir, "documents", "originals")
+	_ = filepath.Walk(originalsDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			rel, _ := filepath.Rel(h.cfg.MediaDir, path)
+			if entry, err := zipWriter.Create(filepath.ToSlash(rel)); err == nil {
+				if f, err := os.Open(path); err == nil {
+					_, _ = io.Copy(entry, f)
+					_ = f.Close()
+				}
+			}
+		}
+		return nil
+	})
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"log"
 	"mime"
 	"os"
 	"path/filepath"
@@ -20,6 +19,7 @@ import (
 	"paperless-go/internal/classifier"
 	"paperless-go/internal/compress"
 	"paperless-go/internal/config"
+	"paperless-go/internal/crypto"
 	"paperless-go/internal/database"
 	"paperless-go/internal/models"
 	"paperless-go/internal/workflow"
@@ -234,9 +234,15 @@ func (c *Consumer) ConsumeFile(srcPath, originalFileName string, opts *ConsumeOp
 	// Detect accurate page count (Feature #3)
 	pageCount := DetectPageCount(srcPath, mimeType)
 
-	// 7. Insert Document record with Zstandard compression
+	// 7. Atomic Transactional Insert with Zstandard compression
 	compressedContent := compress.CompressText(content)
-	res, err := c.db.Exec(`
+	tx, err := c.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin atomic database transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec(`
 		INSERT INTO documents (
 			title, content, correspondent_id, document_type_id, storage_path_id,
 			created, modified, added, original_filename, checksum, mime_type, page_count, owner_id, archive_serial_number
@@ -249,12 +255,36 @@ func (c *Consumer) ConsumeFile(srcPath, originalFileName string, opts *ConsumeOp
 	docID64, _ := res.LastInsertId()
 	docID := int(docID64)
 
-	// Index full uncompressed text in SQLite FTS5
-	_, _ = c.db.Exec("INSERT OR REPLACE INTO documents_fts (rowid, title, content) VALUES (?, ?, ?)", docID, title, content)
+	// Index full uncompressed text in SQLite FTS5 within same transaction
+	if _, err := tx.Exec("INSERT OR REPLACE INTO documents_fts (rowid, title, content) VALUES (?, ?, ?)", docID, title, content); err != nil {
+		return 0, fmt.Errorf("failed to index in FTS5: %w", err)
+	}
 
-	// 8. Associate tags
+	// 8. Associate tags within same transaction
 	for tagID := range matchedTags {
-		_, _ = c.db.Exec("INSERT OR IGNORE INTO document_tags (document_id, tag_id) VALUES (?, ?)", docID, tagID)
+		if _, err := tx.Exec("INSERT OR IGNORE INTO document_tags (document_id, tag_id) VALUES (?, ?)", docID, tagID); err != nil {
+			return 0, fmt.Errorf("failed to associate tag: %w", err)
+		}
+	}
+
+	// 9. Store original file ATOMICALLY with fsync staging and optional AES-256-GCM encryption at rest
+	destFileName := fmt.Sprintf("%07d%s", docID, ext)
+	destPath := filepath.Join(c.cfg.MediaDir, "documents", "originals", destFileName)
+
+	var writeErr error
+	if c.cfg.EncryptionAtRest {
+		writeErr = crypto.EncryptFile(srcPath, destPath, c.cfg.EncryptionKey)
+	} else {
+		writeErr = crypto.AtomicCopy(srcPath, destPath)
+	}
+	if writeErr != nil {
+		return 0, fmt.Errorf("failed to store document file atomically on disk: %w", writeErr)
+	}
+
+	// Commit database transaction ONLY AFTER file is safely and atomically flushed to physical disk!
+	if err := tx.Commit(); err != nil {
+		_ = os.Remove(destPath)
+		return 0, fmt.Errorf("failed to commit document transaction: %w", err)
 	}
 
 	// 8b. Execute Native Workflows (Feature #10)
@@ -311,15 +341,6 @@ func (c *Consumer) ConsumeFile(srcPath, originalFileName string, opts *ConsumeOp
 				}
 			}
 		}(docID, title, content)
-	}
-
-	// 9. Store original file
-	destFileName := fmt.Sprintf("%07d%s", docID, ext)
-	destPath := filepath.Join(c.cfg.MediaDir, "documents", "originals", destFileName)
-	_ = os.MkdirAll(filepath.Dir(destPath), 0755)
-
-	if err := copyFile(srcPath, destPath); err != nil {
-		log.Printf("Warning: failed to copy original file to %s: %v", destPath, err)
 	}
 
 	// 10. Attempt to generate searchable PDF/A archive version or convert Office to PDF (Features #1 & #3)
@@ -487,18 +508,5 @@ func CalculateChecksum(path string) (string, error) {
 }
 
 func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, in)
-	return err
+	return crypto.AtomicCopy(src, dst)
 }
