@@ -48,13 +48,17 @@ Serve o **frontend Angular oficial do Paperless-ngx** (100% idêntico em design,
    - Campos Personalizados (*Custom Fields*)
    - Tarefas em Segundo Plano (*Tasks*) com sincronização em tempo real via WebSocket (`/ws/status/`).
 
-5. **Novas Funcionalidades Enterprise & Homelab:**
+5. **Novas Funcionalidades Enterprise & Homelab (Exclusivas do paperless-go):**
+   - **Assistente de IA & RAG Integrado (`/api/documents/chat/`):** Converse em linguagem natural diretamente com seus documentos ou com todo o acervo. Compatível com **Ollama (local/offline)**, **OpenAI** e **Google Gemini**.
+   - **Extração Inteligente de Metadados via LLM:** Reconhecimento automático e estruturação em JSON de Valor Total, Moeda, Data de Vencimento, NIF/CNPJ e IBAN.
+   - **Pesquisa Semântica Vetorial Híbrida:** Combinação de SQLite FTS5 (BM25) com similaridade de cossenos vetorial, encontrando documentos pelo significado e contexto mesmo sem palavras-chave idênticas.
+   - **Single Sign-On (SSO) via OpenID Connect (OIDC / OAuth2):** Autenticação corporativa com 1 clique (Authentik, Keycloak, Authelia, Google Workspace, GitHub) e provisionamento automático de utilizadores.
    - **Motor de Workflows Nativo:** Triggers e ações automáticas na ingestão de documentos.
    - **Autoclassificador Inteligente:** Machine Learning Naive Bayes em Go para atribuição automática de correspondentes, etiquetas e tipos de documento.
    - **Digitalização de Rede eSCL / AirPrint (`/scan`):** Portal web para acionar scanners de rede sem drivers locais.
    - **Partilha Pública de Documentos (`/share/{slug}`):** Links seguros com expiração e landing page de pré-visualização.
-   - **Autenticação TOTP / MFA:** Segurança reforçada para contas de utilizador.
-   - **Formatos Microsoft Office (DOCX, XLSX, PPTX):** Extração de texto embutida nativa.
+   - **Autenticação TOTP / MFA:** Segurança reforçada para contas de utilizador com QR Code e códigos de recuperação.
+   - **Formatos Microsoft Office (DOCX, XLSX, PPTX):** Extração de texto embutida nativa sem necessidade de Gotenberg.
    - **Documentação Interativa Swagger UI & ReDoc:** Disponível em `/api/schema/swagger-ui/`.
 
 6. **Segurança Rigorosa:**

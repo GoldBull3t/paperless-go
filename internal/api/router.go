@@ -16,6 +16,7 @@ import (
 	"paperless-go/internal/consumer"
 	"paperless-go/internal/database"
 	"paperless-go/internal/models"
+	"paperless-go/internal/oidc"
 	"paperless-go/internal/queue"
 )
 
@@ -73,8 +74,21 @@ func NewRouter(
 	r.Use(AuthMiddleware(authSvc))
 	r.Use(CSRFMiddleware)
 
+	// Initialize OIDC Client
+	oidcClient := oidc.NewClient(oidc.Config{
+		Enabled:      cfg.OIDCEnabled,
+		ProviderName: cfg.OIDCProviderName,
+		ClientID:     cfg.OIDCClientID,
+		ClientSecret: cfg.OIDCClientSecret,
+		DiscoveryURL: cfg.OIDCDiscoveryURL,
+		AuthURL:      cfg.OIDCAuthURL,
+		TokenURL:     cfg.OIDCTokenURL,
+		UserInfoURL:  cfg.OIDCUserInfoURL,
+		RedirectURI:  cfg.OIDCRedirectURI,
+	})
+
 	// Initialize handlers
-	authH := NewAuthHandler(db, authSvc)
+	authH := NewAuthHandler(db, authSvc, oidcClient)
 	uiSettingsH := NewUISettingsHandler(db)
 	configH := NewConfigHandler(db)
 	docsH := NewDocumentsHandler(db, cfg, consumer, q, wsHub)
@@ -88,7 +102,7 @@ func NewRouter(
 	statsH := NewStatisticsHandler(db)
 	usersH := NewUsersHandler(db)
 	workflowsH := NewWorkflowsHandler(db)
-	searchH := NewSearchHandler(db)
+	searchH := NewSearchHandler(db, consumer)
 	bulkH := NewBulkObjectsHandler(db)
 	scanH := NewScanHandler(cfg, consumer, q)
 	shareLinksH := NewShareLinksHandler(db, cfg)
@@ -107,6 +121,8 @@ func NewRouter(
 	apiRouter := func(r chi.Router) {
 		// Public auth endpoint
 		r.Post("/token/", authH.GetToken)
+		r.Get("/auth/oidc/login", authH.OIDCLogin)
+		r.Get("/auth/oidc/callback", authH.OIDCCallback)
 
 		// Authenticated API endpoints
 		r.Group(func(r chi.Router) {
@@ -153,6 +169,8 @@ func NewRouter(
 				r.Post("/reprocess/", docsH.ReprocessDocuments)
 				r.Post("/bulk_download/", docsH.BulkDownload)
 				r.Post("/chat/", docsH.Chat)
+				r.Post("/{id}/extract_metadata/", docsH.ExtractMetadata)
+				r.Get("/{id}/summary/", docsH.Summary)
 				r.Get("/{id}/", docsH.Get)
 				r.Put("/{id}/", docsH.Update)
 				r.Patch("/{id}/", docsH.Update)
@@ -335,6 +353,10 @@ func NewRouter(
 	// Authentication forms / redirects
 	r.HandleFunc("/accounts/login/", authH.LoginPage)
 	r.HandleFunc("/accounts/logout/", authH.Logout)
+	r.Get("/accounts/oidc/login", authH.OIDCLogin)
+	r.Get("/accounts/oidc/callback", authH.OIDCCallback)
+	r.Get("/api/auth/oidc/login", authH.OIDCLogin)
+	r.Get("/api/auth/oidc/callback", authH.OIDCCallback)
 
 	// Static assets (/static/*)
 	staticFS := http.FileServer(http.Dir(cfg.StaticDir))

@@ -4,23 +4,45 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
-	Host            string
-	Port            int
-	DataDir         string
-	MediaDir        string
-	ConsumeDir      string
-	StaticDir       string
-	DatabasePath    string
-	SecretKey       string
-	OCRMode         string // "skip", "auto", "force"
-	OCRWorkerCount  int
-	AutoTagging     bool
-	DefaultLanguage string
-	AutoLogin       bool
+	Host             string
+	Port             int
+	DataDir          string
+	MediaDir         string
+	ConsumeDir       string
+	StaticDir        string
+	DatabasePath     string
+	SecretKey        string
+	OCRMode          string // "skip", "auto", "force"
+	OCRWorkerCount   int
+	AutoTagging      bool
+	DefaultLanguage  string
+	AutoLogin        bool
 	CorsAllowedHosts string
+
+	// AI Configuration (1. A, 1. B, 1. C)
+	AIEnabled          bool
+	AIProvider         string // "ollama", "openai", "gemini"
+	AIAPIURL           string
+	AIAPIKey           string
+	AIModel            string
+	AIEmbeddingModel   string
+	AIExtractOnConsume bool
+
+	// OIDC / SSO Configuration (4. A)
+	OIDCEnabled      bool
+	OIDCProviderName string
+	OIDCClientID     string
+	OIDCClientSecret string
+	OIDCDiscoveryURL string
+	OIDCAuthURL      string
+	OIDCTokenURL     string
+	OIDCUserInfoURL  string
+	OIDCRedirectURI  string
+	OIDCAutoCreate   bool
 }
 
 func Load() *Config {
@@ -55,21 +77,62 @@ func Load() *Config {
 	autoLogin := getEnv("PAPERLESS_AUTO_LOGIN", "false") == "true"
 	corsAllowed := getEnv("PAPERLESS_CORS_ALLOWED_HOSTS", "")
 
+	// AI Defaults & envs
+	aiProvider := strings.ToLower(getEnv("PAPERLESS_AI_PROVIDER", "ollama"))
+	aiEnabled := getEnv("PAPERLESS_AI_ENABLED", "false") == "true" || os.Getenv("PAPERLESS_AI_PROVIDER") != "" || os.Getenv("PAPERLESS_AI_API_KEY") != ""
+	aiURL := getEnv("PAPERLESS_AI_API_URL", "")
+	if aiURL == "" && aiProvider == "ollama" {
+		aiURL = "http://localhost:11434"
+	}
+	aiKey := getEnv("PAPERLESS_AI_API_KEY", "")
+	aiModel := getEnv("PAPERLESS_AI_MODEL", "")
+	aiEmbModel := getEnv("PAPERLESS_AI_EMBEDDING_MODEL", "")
+	aiExtractOnConsume := getEnv("PAPERLESS_AI_EXTRACT_ON_CONSUME", "true") == "true"
+
+	// OIDC Defaults & envs
+	oidcClientID := getEnv("PAPERLESS_OIDC_CLIENT_ID", "")
+	oidcEnabled := getEnv("PAPERLESS_OIDC_ENABLED", "false") == "true" || oidcClientID != ""
+	oidcProviderName := getEnv("PAPERLESS_OIDC_PROVIDER_NAME", "SSO")
+	oidcClientSecret := getEnv("PAPERLESS_OIDC_CLIENT_SECRET", "")
+	oidcDiscovery := getEnv("PAPERLESS_OIDC_DISCOVERY_URL", "")
+	oidcAuthURL := getEnv("PAPERLESS_OIDC_AUTH_URL", "")
+	oidcTokenURL := getEnv("PAPERLESS_OIDC_TOKEN_URL", "")
+	oidcUserInfoURL := getEnv("PAPERLESS_OIDC_USERINFO_URL", "")
+	oidcRedirectURI := getEnv("PAPERLESS_OIDC_REDIRECT_URI", "")
+	oidcAutoCreate := getEnv("PAPERLESS_OIDC_AUTO_CREATE_USER", "true") == "true"
+
 	return &Config{
-		Host:             host,
-		Port:             port,
-		DataDir:          dataDir,
-		MediaDir:         mediaDir,
-		ConsumeDir:       consumeDir,
-		StaticDir:        staticDir,
-		DatabasePath:     dbPath,
-		SecretKey:        secret,
-		OCRMode:          ocrMode,
-		OCRWorkerCount:   ocrWorkers,
-		AutoTagging:      getEnv("PAPERLESS_AUTO_TAGGING", "true") == "true",
-		DefaultLanguage:  defaultLang,
-		AutoLogin:        autoLogin,
-		CorsAllowedHosts: corsAllowed,
+		Host:               host,
+		Port:               port,
+		DataDir:            dataDir,
+		MediaDir:           mediaDir,
+		ConsumeDir:         consumeDir,
+		StaticDir:          staticDir,
+		DatabasePath:       dbPath,
+		SecretKey:          secret,
+		OCRMode:            ocrMode,
+		OCRWorkerCount:     ocrWorkers,
+		AutoTagging:        getEnv("PAPERLESS_AUTO_TAGGING", "true") == "true",
+		DefaultLanguage:    defaultLang,
+		AutoLogin:          autoLogin,
+		CorsAllowedHosts:   corsAllowed,
+		AIEnabled:          aiEnabled,
+		AIProvider:         aiProvider,
+		AIAPIURL:           aiURL,
+		AIAPIKey:           aiKey,
+		AIModel:            aiModel,
+		AIEmbeddingModel:   aiEmbModel,
+		AIExtractOnConsume: aiExtractOnConsume,
+		OIDCEnabled:        oidcEnabled,
+		OIDCProviderName:   oidcProviderName,
+		OIDCClientID:       oidcClientID,
+		OIDCClientSecret:   oidcClientSecret,
+		OIDCDiscoveryURL:   oidcDiscovery,
+		OIDCAuthURL:        oidcAuthURL,
+		OIDCTokenURL:       oidcTokenURL,
+		OIDCUserInfoURL:    oidcUserInfoURL,
+		OIDCRedirectURI:    oidcRedirectURI,
+		OIDCAutoCreate:     oidcAutoCreate,
 	}
 }
 

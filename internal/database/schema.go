@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS documents (
     mime_type TEXT NOT NULL,
     page_count INTEGER DEFAULT 1,
     owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    extracted_metadata_json TEXT DEFAULT '{}',
     deleted_at DATETIME
 );
 
@@ -183,6 +184,13 @@ CREATE TABLE IF NOT EXISTS mail_rules (
     name TEXT NOT NULL,
     account_id INTEGER REFERENCES mail_accounts(id) ON DELETE CASCADE,
     order_num INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS document_embeddings (
+    document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+    embedding_json TEXT NOT NULL,
+    model TEXT NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(

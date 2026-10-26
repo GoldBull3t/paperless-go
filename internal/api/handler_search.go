@@ -1,23 +1,30 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
 
+	"paperless-go/internal/ai"
 	"paperless-go/internal/compress"
+	"paperless-go/internal/consumer"
 	"paperless-go/internal/database"
 	"paperless-go/internal/models"
 )
 
 type SearchHandler struct {
-	db *database.DB
+	db       *database.DB
+	consumer *consumer.Consumer
 }
 
-func NewSearchHandler(db *database.DB) *SearchHandler {
-	return &SearchHandler{db: db}
+func NewSearchHandler(db *database.DB, consumer *consumer.Consumer) *SearchHandler {
+	return &SearchHandler{db: db, consumer: consumer}
 }
 
 func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
@@ -28,6 +35,44 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 	// 1. Documents (up to 10)
 	var docs []models.Document
 	if query != "" {
+		// Hybrid Semantic Vector Search (Feature 1. C)
+		var semanticDocIDs []int
+		if h.consumer != nil && h.consumer.GetAIProvider() != nil {
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			defer cancel()
+			qEmbs, err := h.consumer.GetAIProvider().Embed(ctx, []string{query})
+			if err == nil && len(qEmbs) > 0 {
+				qVec := qEmbs[0]
+				embRows, err := h.db.Query("SELECT document_id, embedding_json FROM document_embeddings")
+				if err == nil {
+					defer embRows.Close()
+					type scoredDoc struct {
+						id    int
+						score float32
+					}
+					var scored []scoredDoc
+					for embRows.Next() {
+						var docID int
+						var rawEmb string
+						if err := embRows.Scan(&docID, &rawEmb); err == nil {
+							if docVec, err := ai.DecodeEmbedding(rawEmb); err == nil {
+								sim := ai.CosineSimilarity(qVec, docVec)
+								if sim > 0.40 {
+									scored = append(scored, scoredDoc{id: docID, score: sim})
+								}
+							}
+						}
+					}
+					sort.Slice(scored, func(i, j int) bool {
+						return scored[i].score > scored[j].score
+					})
+					for i := 0; i < len(scored) && i < 10; i++ {
+						semanticDocIDs = append(semanticDocIDs, scored[i].id)
+					}
+				}
+			}
+		}
+
 		safeFTS := sanitizeFTSQuery(query)
 		var docRows *sql.Rows
 		var err error
@@ -36,6 +81,15 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 		var docArgs []interface{}
 		if user != nil && !user.IsSuperuser {
 			docOwnerFilter = " AND (d.owner_id IS NULL OR d.owner_id = ?)"
+		}
+
+		semanticClause := ""
+		if len(semanticDocIDs) > 0 {
+			var idsStr []string
+			for _, id := range semanticDocIDs {
+				idsStr = append(idsStr, strconv.Itoa(id))
+			}
+			semanticClause = fmt.Sprintf(" OR d.id IN (%s)", strings.Join(idsStr, ","))
 		}
 
 		if safeFTS != "" {
@@ -48,9 +102,9 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 				       d.created, d.modified, d.added, d.archive_serial_number, d.original_filename, d.archive_filename,
 				       d.mime_type, d.owner_id, d.page_count
 				FROM documents d
-				WHERE d.deleted_at IS NULL AND (d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?) OR d.title LIKE ?)%s
+				WHERE d.deleted_at IS NULL AND (d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?) OR d.title LIKE ?%s)%s
 				ORDER BY d.created DESC LIMIT 10
-			`, docOwnerFilter), docArgs...)
+			`, semanticClause, docOwnerFilter), docArgs...)
 		} else {
 			docArgs = append(docArgs, likeQuery, likeQuery)
 			if user != nil && !user.IsSuperuser {
@@ -61,9 +115,9 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 				       d.created, d.modified, d.added, d.archive_serial_number, d.original_filename, d.archive_filename,
 				       d.mime_type, d.owner_id, d.page_count
 				FROM documents d
-				WHERE d.deleted_at IS NULL AND (d.title LIKE ? OR d.content LIKE ?)%s
+				WHERE d.deleted_at IS NULL AND (d.title LIKE ? OR d.content LIKE ?%s)%s
 				ORDER BY d.created DESC LIMIT 10
-			`, docOwnerFilter), docArgs...)
+			`, semanticClause, docOwnerFilter), docArgs...)
 		}
 
 		if err == nil {

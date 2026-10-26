@@ -121,6 +121,7 @@ type Document struct {
 	CustomFields        []DocumentCustomFieldValue `json:"custom_fields"`
 	PageCount           int                        `json:"page_count"`
 	MimeType            string                     `json:"mime_type"`
+	ExtractedMetadata   interface{}                `json:"extracted_metadata,omitempty"`
 	SearchHit           interface{}                `json:"__search_hit__,omitempty"`
 	DeletedAt           *time.Time                 `json:"deleted_at,omitempty"`
 }

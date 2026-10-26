@@ -10,19 +10,22 @@ import (
 
 	"paperless-go/internal/auth"
 	"paperless-go/internal/database"
+	"paperless-go/internal/oidc"
 )
 
 type AuthHandler struct {
 	db          *database.DB
 	authSvc     *auth.Service
 	rateLimiter *auth.RateLimiter
+	oidcClient  *oidc.Client
 }
 
-func NewAuthHandler(db *database.DB, authSvc *auth.Service) *AuthHandler {
+func NewAuthHandler(db *database.DB, authSvc *auth.Service, oidcClient *oidc.Client) *AuthHandler {
 	return &AuthHandler{
 		db:          db,
 		authSvc:     authSvc,
 		rateLimiter: auth.NewRateLimiter(5, 5*time.Minute, 5*time.Minute),
+		oidcClient:  oidcClient,
 	}
 }
 
@@ -317,7 +320,28 @@ func (h *AuthHandler) renderLoginForm(w http.ResponseWriter, errorMsg, next stri
 		if !remember {
 			rememberChecked = ""
 		}
+
+		ssoButtonHtml := ""
+		if h.oidcClient != nil && h.oidcClient.IsEnabled() {
+			ssoButtonHtml = fmt.Sprintf(`
+			<div class="d-grid mb-3">
+				<a href="/api/auth/oidc/login?next=%s" class="btn btn-outline-secondary d-flex align-items-center justify-content-center py-2 text-decoration-none">
+					<svg class="me-2" width="18" height="18" fill="currentColor" viewBox="0 0 16 16">
+						<path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0zm3.5 7.5a.5.5 0 0 1 0 1H5.707l2.147 2.146a.5.5 0 0 1-.708.708l-3-3a.5.5 0 0 1 0-.708l3-3a.5.5 0 1 1 .708.708L5.707 7.5H11.5z"/>
+					</svg>
+					<span>Sign in with %s (SSO)</span>
+				</a>
+			</div>
+			<div class="d-flex align-items-center my-3">
+				<hr class="flex-grow-1 my-0" style="border-color: var(--border-color);">
+				<span class="px-2 small text-muted">or continue with password</span>
+				<hr class="flex-grow-1 my-0" style="border-color: var(--border-color);">
+			</div>
+			`, html.EscapeString(next), html.EscapeString(h.oidcClient.ProviderName()))
+		}
+
 		formContent = fmt.Sprintf(`
+		%s
 		%s
 		<form method="POST" action="/accounts/login/?next=%s" id="loginForm">
 			<div class="form-floating mb-3">
@@ -356,7 +380,7 @@ func (h *AuthHandler) renderLoginForm(w http.ResponseWriter, errorMsg, next stri
 				<span id="btnText">Sign in</span>
 			</button>
 		</form>
-		`, errorHtml, html.EscapeString(next), rememberChecked)
+		`, errorHtml, ssoButtonHtml, html.EscapeString(next), rememberChecked)
 	}
 
 	htmlContent := fmt.Sprintf(`<!doctype html>
@@ -747,6 +771,164 @@ func (h *AuthHandler) DisconnectSocialAccount(w http.ResponseWriter, r *http.Req
 }
 
 func (h *AuthHandler) GetSocialAccountProviders(w http.ResponseWriter, r *http.Request) {
+	var providers []map[string]interface{}
+	if h.oidcClient != nil && h.oidcClient.IsEnabled() {
+		providers = append(providers, map[string]interface{}{
+			"id":   "oidc",
+			"name": h.oidcClient.ProviderName(),
+		})
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode([]interface{}{})
+	_ = json.NewEncoder(w).Encode(providers)
+}
+
+func (h *AuthHandler) OIDCLogin(w http.ResponseWriter, r *http.Request) {
+	if h.oidcClient == nil || !h.oidcClient.IsEnabled() {
+		http.Error(w, "OIDC / SSO is not configured on this server.", http.StatusServiceUnavailable)
+		return
+	}
+
+	state := oidc.GenerateRandomState()
+	next := r.URL.Query().Get("next")
+	if next == "" {
+		next = "/"
+	}
+
+	stateValue := fmt.Sprintf("%s:%s", state, next)
+	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oidc_state",
+		Value:    stateValue,
+		Path:     "/",
+		MaxAge:   300, // 5 minutes
+		HttpOnly: true,
+		Secure:   isSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	authURL, err := h.oidcClient.GetAuthURL(r.Context(), state, "")
+	if err != nil {
+		http.Error(w, "Failed to initiate OIDC login: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+func (h *AuthHandler) OIDCCallback(w http.ResponseWriter, r *http.Request) {
+	if h.oidcClient == nil || !h.oidcClient.IsEnabled() {
+		http.Error(w, "OIDC / SSO is not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	stateCookie, err := r.Cookie("oidc_state")
+	if err != nil || stateCookie.Value == "" {
+		http.Error(w, "Missing or expired OIDC state parameter", http.StatusBadRequest)
+		return
+	}
+
+	parts := strings.SplitN(stateCookie.Value, ":", 2)
+	expectedState := parts[0]
+	next := "/"
+	if len(parts) > 1 && parts[1] != "" {
+		next = parts[1]
+	}
+
+	incomingState := r.URL.Query().Get("state")
+	if incomingState != expectedState {
+		http.Error(w, "Invalid OIDC state parameter (CSRF protection)", http.StatusBadRequest)
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		http.Error(w, "Missing authorization code from OIDC provider", http.StatusBadRequest)
+		return
+	}
+
+	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oidc_state",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   isSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	tokenResp, err := h.oidcClient.ExchangeCode(r.Context(), code, "")
+	if err != nil {
+		http.Error(w, "Failed to exchange authorization code: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	userInfo, err := h.oidcClient.GetUserInfo(r.Context(), tokenResp.AccessToken)
+	if err != nil {
+		http.Error(w, "Failed to fetch userinfo from OIDC provider: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var userID int
+	var authToken string
+	var isActive bool
+	err = h.db.QueryRow(`
+		SELECT id, auth_token, is_active FROM users
+		WHERE oidc_sub = ? OR (email != '' AND email = ?) OR username = ?
+	`, userInfo.Sub, userInfo.Email, userInfo.PreferredUsername).Scan(&userID, &authToken, &isActive)
+
+	if err != nil {
+		username := userInfo.PreferredUsername
+		if username == "" && userInfo.Email != "" {
+			username = strings.Split(userInfo.Email, "@")[0]
+		}
+		if username == "" {
+			username = "oidc_" + userInfo.Sub
+		}
+
+		newToken := auth.GenerateToken(40)
+		res, err := h.db.Exec(`
+			INSERT INTO users (username, email, first_name, last_name, oidc_sub, is_active, password_hash, auth_token)
+			VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+		`, username, userInfo.Email, userInfo.GivenName, userInfo.FamilyName, userInfo.Sub, "oidc_auth_no_password", newToken)
+		if err != nil {
+			http.Error(w, "Failed to auto-provision user: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		id64, _ := res.LastInsertId()
+		userID = int(id64)
+		authToken = newToken
+	} else if !isActive {
+		http.Error(w, "Your user account is disabled", http.StatusForbidden)
+		return
+	} else {
+		_, _ = h.db.Exec("UPDATE users SET oidc_sub = ? WHERE id = ?", userInfo.Sub, userID)
+		if authToken == "" {
+			authToken = auth.GenerateToken(40)
+			_, _ = h.db.Exec("UPDATE users SET auth_token = ? WHERE id = ?", authToken, userID)
+		}
+	}
+
+	maxAge := 30 * 24 * 3600 // 30 days
+	http.SetCookie(w, &http.Cookie{
+		Name:     "sessionid",
+		Value:    authToken,
+		Path:     "/",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		Secure:   isSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "csrftoken",
+		Value:    auth.GenerateToken(32),
+		Path:     "/",
+		MaxAge:   maxAge,
+		HttpOnly: false,
+		Secure:   isSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	http.Redirect(w, r, next, http.StatusFound)
 }

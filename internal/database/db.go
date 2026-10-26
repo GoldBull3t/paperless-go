@@ -49,6 +49,8 @@ func (db *DB) migrate() error {
 	_, _ = db.Exec("ALTER TABLE users ADD COLUMN totp_secret TEXT DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE users ADD COLUMN is_mfa_enabled BOOLEAN DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE users ADD COLUMN recovery_codes_json TEXT DEFAULT '[]'")
-	log.Println("Database schema migrated successfully (SQLite WAL + FTS5)")
+	_, _ = db.Exec("ALTER TABLE users ADD COLUMN oidc_sub TEXT UNIQUE")
+	_, _ = db.Exec("ALTER TABLE documents ADD COLUMN extracted_metadata_json TEXT DEFAULT '{}'")
+	log.Println("Database schema migrated successfully (SQLite WAL + FTS5 + AI Embeddings)")
 	return nil
 }

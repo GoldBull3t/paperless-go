@@ -15,6 +15,7 @@ import (
 	"unicode"
 
 	"github.com/go-chi/chi/v5"
+	"paperless-go/internal/ai"
 	"paperless-go/internal/compress"
 	"paperless-go/internal/config"
 	"paperless-go/internal/consumer"
@@ -837,9 +838,192 @@ func (h *DocumentsHandler) AISuggestions(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *DocumentsHandler) Chat(w http.ResponseWriter, r *http.Request) {
+	if h.consumer == nil || h.consumer.GetRAGService() == nil {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"message": "AI assistant is not configured on this instance. Configure PAPERLESS_AI_ENABLED=true and PAPERLESS_AI_PROVIDER.",
+			"sources": []interface{}{},
+		})
+		return
+	}
+
+	var input struct {
+		Message   string           `json:"message"`
+		Documents []int            `json:"documents"`
+		History   []ai.ChatMessage `json:"history"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil || strings.TrimSpace(input.Message) == "" {
+		http.Error(w, "Valid 'message' is required", http.StatusBadRequest)
+		return
+	}
+
+	user := GetUserFromContext(r.Context())
+
+	var docContexts []ai.DocumentContext
+	// 1. If explicit documents provided:
+	if len(input.Documents) > 0 {
+		allowed := h.filterAllowedDocuments(input.Documents, user)
+		for _, docID := range allowed {
+			doc, err := h.fetchDocumentWithUser(docID, user)
+			if err == nil && doc != nil {
+				docContexts = append(docContexts, ai.DocumentContext{
+					ID:      doc.ID,
+					Title:   doc.Title,
+					Created: doc.CreatedDate,
+					Content: doc.Content,
+				})
+			}
+		}
+	} else {
+		// 2. RAG retrieval: Find top matching documents via FTS5 / Search
+		cleanQuery := sanitizeFTSQuery(input.Message)
+		var rows *sql.Rows
+		var err error
+		if cleanQuery != "" {
+			rows, err = h.db.Query(`
+				SELECT d.id, d.title, d.content, d.created
+				FROM documents d
+				WHERE d.deleted_at IS NULL AND (d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?) OR d.title LIKE ?)
+				ORDER BY d.created DESC LIMIT 5
+			`, cleanQuery, "%"+input.Message+"%")
+		} else {
+			rows, err = h.db.Query(`
+				SELECT d.id, d.title, d.content, d.created
+				FROM documents d
+				WHERE d.deleted_at IS NULL
+				ORDER BY d.created DESC LIMIT 5
+			`)
+		}
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var id int
+				var title, rawContent string
+				var created time.Time
+				if err := rows.Scan(&id, &title, &rawContent, &created); err == nil {
+					docContexts = append(docContexts, ai.DocumentContext{
+						ID:      id,
+						Title:   title,
+						Created: created.Format("2006-01-02"),
+						Content: compress.DecompressText(rawContent),
+					})
+				}
+			}
+		}
+	}
+
+	response, err := h.consumer.GetRAGService().ChatWithDocuments(r.Context(), input.Message, docContexts, input.History)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	var sources []map[string]interface{}
+	for _, dc := range docContexts {
+		sources = append(sources, map[string]interface{}{
+			"id":      dc.ID,
+			"title":   dc.Title,
+			"created": dc.Created,
+		})
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"message": "AI assistant is not configured on this instance.",
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": response,
+		"sources": sources,
+	})
+}
+
+func (h *DocumentsHandler) ExtractMetadata(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	exists, allowed := h.checkDocumentAccess(r, id)
+	if !exists {
+		http.NotFound(w, r)
+		return
+	}
+	if !allowed {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+
+	if h.consumer == nil || h.consumer.GetExtractorService() == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "AI Extractor is not configured on this instance.",
+		})
+		return
+	}
+
+	doc, err := h.fetchDocument(id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	meta, err := h.consumer.GetExtractorService().ExtractMetadata(r.Context(), doc.Title, doc.Content)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	metaJSON, _ := json.Marshal(meta)
+	_, _ = h.db.Exec("UPDATE documents SET extracted_metadata_json = ? WHERE id = ?", string(metaJSON), id)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(meta)
+}
+
+func (h *DocumentsHandler) Summary(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	exists, allowed := h.checkDocumentAccess(r, id)
+	if !exists {
+		http.NotFound(w, r)
+		return
+	}
+	if !allowed {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+
+	if h.consumer == nil || h.consumer.GetRAGService() == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "AI is not configured on this instance.",
+		})
+		return
+	}
+
+	doc, err := h.fetchDocument(id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	summary, err := h.consumer.GetRAGService().SummarizeDocument(r.Context(), doc.Title, doc.Content)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":      doc.ID,
+		"title":   doc.Title,
+		"summary": summary,
 	})
 }
 

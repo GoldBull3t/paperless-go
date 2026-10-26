@@ -13,6 +13,10 @@ import (
 	"strings"
 	"time"
 
+	"context"
+	"encoding/json"
+
+	"paperless-go/internal/ai"
 	"paperless-go/internal/classifier"
 	"paperless-go/internal/compress"
 	"paperless-go/internal/config"
@@ -22,19 +26,55 @@ import (
 )
 
 type Consumer struct {
-	db       *database.DB
-	cfg      *config.Config
-	clf      *classifier.Classifier
-	wfEngine *workflow.Engine
+	db         *database.DB
+	cfg        *config.Config
+	clf        *classifier.Classifier
+	wfEngine   *workflow.Engine
+	aiProvider ai.Provider
+	ragSvc     *ai.RAGService
+	extractor  *ai.ExtractorService
 }
 
 func NewConsumer(db *database.DB, cfg *config.Config) *Consumer {
-	return &Consumer{
+	c := &Consumer{
 		db:       db,
 		cfg:      cfg,
 		clf:      classifier.NewClassifier(db),
 		wfEngine: workflow.NewEngine(db),
 	}
+
+	if cfg.AIEnabled {
+		prov := ai.NewProvider(ai.ProviderConfig{
+			Provider:       cfg.AIProvider,
+			BaseURL:        cfg.AIAPIURL,
+			APIKey:         cfg.AIAPIKey,
+			Model:          cfg.AIModel,
+			EmbeddingModel: cfg.AIEmbeddingModel,
+		})
+		c.aiProvider = prov
+		c.ragSvc = ai.NewRAGService(prov)
+		c.extractor = ai.NewExtractorService(prov)
+	}
+
+	return c
+}
+
+func (c *Consumer) SetAI(provider ai.Provider, rag *ai.RAGService, extractor *ai.ExtractorService) {
+	c.aiProvider = provider
+	c.ragSvc = rag
+	c.extractor = extractor
+}
+
+func (c *Consumer) GetRAGService() *ai.RAGService {
+	return c.ragSvc
+}
+
+func (c *Consumer) GetExtractorService() *ai.ExtractorService {
+	return c.extractor
+}
+
+func (c *Consumer) GetAIProvider() ai.Provider {
+	return c.aiProvider
 }
 
 func (c *Consumer) GetClassifier() *classifier.Classifier {
@@ -243,6 +283,34 @@ func (c *Consumer) ConsumeFile(srcPath, originalFileName string, opts *ConsumeOp
 		go func() {
 			_ = c.clf.Train()
 		}()
+	}
+
+	// Asynchronously execute AI Embeddings & Metadata Extraction (Features 1.A, 1.B, 1.C)
+	if c.aiProvider != nil && c.cfg.AIEnabled {
+		go func(id int, docTitle, docContent string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+
+			// 1. Generate & store embeddings for semantic vector search (1. C)
+			embs, err := c.aiProvider.Embed(ctx, []string{docTitle + " " + docContent})
+			if err == nil && len(embs) > 0 {
+				if embJSON, err := ai.EncodeEmbedding(embs[0]); err == nil {
+					_, _ = c.db.Exec(`
+						INSERT OR REPLACE INTO document_embeddings (document_id, embedding_json, model, updated_at)
+						VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+					`, id, embJSON, c.cfg.AIEmbeddingModel)
+				}
+			}
+
+			// 2. Extract structured metadata (1. B)
+			if c.extractor != nil && c.cfg.AIExtractOnConsume {
+				meta, err := c.extractor.ExtractMetadata(ctx, docTitle, docContent)
+				if err == nil && meta != nil {
+					metaJSON, _ := json.Marshal(meta)
+					_, _ = c.db.Exec("UPDATE documents SET extracted_metadata_json = ? WHERE id = ?", string(metaJSON), id)
+				}
+			}
+		}(docID, title, content)
 	}
 
 	// 9. Store original file
