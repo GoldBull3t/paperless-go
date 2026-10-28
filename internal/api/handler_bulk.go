@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"paperless-go/internal/database"
+	"paperless-go/internal/models"
 )
 
 type BulkObjectsHandler struct {
@@ -17,10 +18,13 @@ func NewBulkObjectsHandler(db *database.DB) *BulkObjectsHandler {
 
 func (h *BulkObjectsHandler) BulkEditObjects(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		ObjectType string `json:"object_type"`
-		Operation  string `json:"operation"`
-		Objects    []int  `json:"objects"`
-		All        bool   `json:"all"`
+		ObjectType  string                     `json:"object_type"`
+		Operation   string                     `json:"operation"`
+		Objects     []int                      `json:"objects"`
+		All         bool                       `json:"all"`
+		Owner       *int                       `json:"owner"`
+		Permissions *models.ObjectPermissions  `json:"permissions"`
+		Merge       bool                       `json:"merge"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -29,7 +33,30 @@ func (h *BulkObjectsHandler) BulkEditObjects(w http.ResponseWriter, r *http.Requ
 
 	user := GetUserFromContext(r.Context())
 
-	if input.Operation == "delete" {
+	if input.Operation == "set_permissions" {
+		targetTable := ""
+		switch input.ObjectType {
+		case "tags":
+			targetTable = "tags"
+		case "correspondents":
+			targetTable = "correspondents"
+		case "document_types":
+			targetTable = "document_types"
+		case "storage_paths":
+			targetTable = "storage_paths"
+		}
+		if targetTable != "" {
+			for _, id := range input.Objects {
+				if input.Owner != nil {
+					if *input.Owner <= 0 {
+						_, _ = h.db.Exec("UPDATE "+targetTable+" SET owner_id = NULL WHERE id = ?", id)
+					} else {
+						_, _ = h.db.Exec("UPDATE "+targetTable+" SET owner_id = ? WHERE id = ?", *input.Owner, id)
+					}
+				}
+			}
+		}
+	} else if input.Operation == "delete" {
 		switch input.ObjectType {
 		case "tags":
 			for _, id := range input.Objects {

@@ -64,6 +64,7 @@ func (db *DB) migrate() error {
 	_, _ = db.Exec("ALTER TABLE documents ADD COLUMN archive_filename TEXT")
 	_, _ = db.Exec("ALTER TABLE documents ADD COLUMN page_count INTEGER DEFAULT 1")
 	_, _ = db.Exec("ALTER TABLE documents ADD COLUMN owner_id INTEGER")
+	_, _ = db.Exec("ALTER TABLE documents ADD COLUMN root_document_id INTEGER")
 	_, _ = db.Exec("ALTER TABLE users ADD COLUMN totp_secret TEXT DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE users ADD COLUMN is_mfa_enabled BOOLEAN DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE users ADD COLUMN recovery_codes_json TEXT DEFAULT '[]'")

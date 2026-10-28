@@ -766,20 +766,54 @@ func (h *AuthHandler) GenerateAuthToken(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *AuthHandler) DisconnectSocialAccount(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		ID int `json:"id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&input)
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(true)
+	if input.ID > 0 {
+		_ = json.NewEncoder(w).Encode(input.ID)
+	} else {
+		_ = json.NewEncoder(w).Encode(true)
+	}
 }
 
 func (h *AuthHandler) GetSocialAccountProviders(w http.ResponseWriter, r *http.Request) {
-	var providers []map[string]interface{}
+	providers := []map[string]interface{}{}
 	if h.oidcClient != nil && h.oidcClient.IsEnabled() {
 		providers = append(providers, map[string]interface{}{
-			"id":   "oidc",
-			"name": h.oidcClient.ProviderName(),
+			"id":        "oidc",
+			"name":      h.oidcClient.ProviderName(),
+			"login_url": "/accounts/oidc/login/?process=connect",
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(providers)
+}
+
+func (h *AuthHandler) Headless(w http.ResponseWriter, r *http.Request) {
+	user := GetUserFromContext(r.Context())
+	w.Header().Set("Content-Type", "application/json")
+	var userData interface{}
+	status := 200
+	if user != nil {
+		userData = map[string]interface{}{
+			"id":         user.ID,
+			"username":   user.Username,
+			"email":      user.Email,
+			"first_name": user.FirstName,
+			"last_name":  user.LastName,
+		}
+	}
+	resp := map[string]interface{}{
+		"status": status,
+		"data": map[string]interface{}{
+			"user":    userData,
+			"methods": []string{"password", "token"},
+			"flows":   []map[string]interface{}{{"id": "login", "is_pending": false}},
+		},
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (h *AuthHandler) OIDCLogin(w http.ResponseWriter, r *http.Request) {

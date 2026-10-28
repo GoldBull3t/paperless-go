@@ -27,64 +27,85 @@ type User struct {
 	AuthToken            *string   `json:"auth_token,omitempty"`
 }
 
+type Group struct {
+	ID          int      `json:"id"`
+	Name        string   `json:"name"`
+	Permissions []string `json:"permissions"`
+}
+
+type PermissionsSet struct {
+	Users  []int `json:"users"`
+	Groups []int `json:"groups"`
+}
+
+type ObjectPermissions struct {
+	View   PermissionsSet `json:"view"`
+	Change PermissionsSet `json:"change"`
+}
+
 type Tag struct {
-	ID                int    `json:"id"`
-	Slug              string `json:"slug"`
-	Name              string `json:"name"`
-	Color             string `json:"color"`
-	TextColor         string `json:"text_color"`
-	Match             string `json:"match"`
-	MatchingAlgorithm int    `json:"matching_algorithm"`
-	IsInsensitive     bool   `json:"is_insensitive"`
-	IsInboxTag        bool   `json:"is_inbox_tag"`
-	Owner             *int   `json:"owner"`
-	UserCanChange     bool   `json:"user_can_change"`
-	DocumentCount     int    `json:"document_count"`
+	ID                int                `json:"id"`
+	Slug              string             `json:"slug"`
+	Name              string             `json:"name"`
+	Color             string             `json:"color"`
+	TextColor         string             `json:"text_color"`
+	Match             string             `json:"match"`
+	MatchingAlgorithm int                `json:"matching_algorithm"`
+	IsInsensitive     bool               `json:"is_insensitive"`
+	IsInboxTag        bool               `json:"is_inbox_tag"`
+	Owner             *int               `json:"owner"`
+	Permissions       *ObjectPermissions `json:"permissions"`
+	UserCanChange     bool               `json:"user_can_change"`
+	DocumentCount     int                `json:"document_count"`
 }
 
 type Correspondent struct {
-	ID                 int        `json:"id"`
-	Slug               string     `json:"slug"`
-	Name               string     `json:"name"`
-	Match              string     `json:"match"`
-	MatchingAlgorithm  int        `json:"matching_algorithm"`
-	IsInsensitive      bool       `json:"is_insensitive"`
-	DocumentCount      int        `json:"document_count"`
-	LastCorrespondence *time.Time `json:"last_correspondence"`
-	Owner              *int       `json:"owner"`
-	UserCanChange      bool       `json:"user_can_change"`
+	ID                 int                `json:"id"`
+	Slug               string             `json:"slug"`
+	Name               string             `json:"name"`
+	Match              string             `json:"match"`
+	MatchingAlgorithm  int                `json:"matching_algorithm"`
+	IsInsensitive      bool               `json:"is_insensitive"`
+	DocumentCount      int                `json:"document_count"`
+	LastCorrespondence *time.Time         `json:"last_correspondence"`
+	Owner              *int               `json:"owner"`
+	Permissions        *ObjectPermissions `json:"permissions"`
+	UserCanChange      bool               `json:"user_can_change"`
 }
 
 type DocumentType struct {
-	ID                int    `json:"id"`
-	Slug              string `json:"slug"`
-	Name              string `json:"name"`
-	Match             string `json:"match"`
-	MatchingAlgorithm int    `json:"matching_algorithm"`
-	IsInsensitive     bool   `json:"is_insensitive"`
-	DocumentCount     int    `json:"document_count"`
-	Owner             *int   `json:"owner"`
-	UserCanChange     bool   `json:"user_can_change"`
+	ID                int                `json:"id"`
+	Slug              string             `json:"slug"`
+	Name              string             `json:"name"`
+	Match             string             `json:"match"`
+	MatchingAlgorithm int                `json:"matching_algorithm"`
+	IsInsensitive     bool               `json:"is_insensitive"`
+	DocumentCount     int                `json:"document_count"`
+	Owner             *int               `json:"owner"`
+	Permissions       *ObjectPermissions `json:"permissions"`
+	UserCanChange     bool               `json:"user_can_change"`
 }
 
 type StoragePath struct {
-	ID                int    `json:"id"`
-	Slug              string `json:"slug"`
-	Name              string `json:"name"`
-	Path              string `json:"path"`
-	Match             string `json:"match"`
-	MatchingAlgorithm int    `json:"matching_algorithm"`
-	IsInsensitive     bool   `json:"is_insensitive"`
-	DocumentCount     int    `json:"document_count"`
-	Owner             *int   `json:"owner"`
-	UserCanChange     bool   `json:"user_can_change"`
+	ID                int                `json:"id"`
+	Slug              string             `json:"slug"`
+	Name              string             `json:"name"`
+	Path              string             `json:"path"`
+	Match             string             `json:"match"`
+	MatchingAlgorithm int                `json:"matching_algorithm"`
+	IsInsensitive     bool               `json:"is_insensitive"`
+	DocumentCount     int                `json:"document_count"`
+	Owner             *int               `json:"owner"`
+	Permissions       *ObjectPermissions `json:"permissions"`
+	UserCanChange     bool               `json:"user_can_change"`
 }
 
 type CustomField struct {
-	ID        int                    `json:"id"`
-	Name      string                 `json:"name"`
-	DataType  string                 `json:"data_type"`
-	ExtraData map[string]interface{} `json:"extra_data"`
+	ID            int                    `json:"id"`
+	Name          string                 `json:"name"`
+	DataType      string                 `json:"data_type"`
+	ExtraData     map[string]interface{} `json:"extra_data"`
+	DocumentCount int                    `json:"document_count"`
 }
 
 type DocumentCustomFieldValue struct {
@@ -99,6 +120,14 @@ type DocumentNote struct {
 	User    *int      `json:"user"`
 }
 
+type DocumentVersionInfo struct {
+	ID        int       `json:"id"`
+	Version   int       `json:"version"`
+	Created   time.Time `json:"created"`
+	PageCount int       `json:"page_count"`
+	Size      int64     `json:"size"`
+}
+
 type Document struct {
 	ID                  int                        `json:"id"`
 	Title               string                     `json:"title"`
@@ -111,9 +140,11 @@ type Document struct {
 	Modified            time.Time                  `json:"modified"`
 	Added               time.Time                  `json:"added"`
 	ArchiveSerialNumber *int                       `json:"archive_serial_number"`
-	OriginalFileName    string                     `json:"original_filename"`
+	OriginalFileName    string                     `json:"original_file_name"`
+	OriginalFileNameOld string                     `json:"original_filename,omitempty"`
 	ArchivedFileName    *string                    `json:"archived_file_name"`
 	Owner               *int                       `json:"owner"`
+	Permissions         *ObjectPermissions         `json:"permissions"`
 	UserCanChange       bool                       `json:"user_can_change"`
 	IsSharedByRequester bool                       `json:"is_shared_by_requester"`
 	Tags                []int                      `json:"tags"`
@@ -121,6 +152,10 @@ type Document struct {
 	CustomFields        []DocumentCustomFieldValue `json:"custom_fields"`
 	PageCount           int                        `json:"page_count"`
 	MimeType            string                     `json:"mime_type"`
+	Checksum            string                     `json:"checksum"`
+	DuplicateDocuments  []int                      `json:"duplicate_documents"`
+	RootDocument        *int                       `json:"root_document"`
+	Versions            []DocumentVersionInfo      `json:"versions"`
 	ExtractedMetadata   interface{}                `json:"extracted_metadata,omitempty"`
 	SearchHit           interface{}                `json:"__search_hit__,omitempty"`
 	DeletedAt           *time.Time                 `json:"deleted_at,omitempty"`
@@ -167,10 +202,16 @@ type DocumentFileTypeCountItem struct {
 
 type Statistics struct {
 	DocumentsTotal         int                         `json:"documents_total"`
-	DocumentsInbox         int                         `json:"documents_inbox"`
+	DocumentsInbox         *int                        `json:"documents_inbox"`
+	InboxTag               *int                        `json:"inbox_tag"`
 	InboxTags              []int                       `json:"inbox_tags"`
 	DocumentFileTypeCounts []DocumentFileTypeCountItem `json:"document_file_type_counts"`
 	CharacterCount         int                         `json:"character_count"`
+	TagCount               int                         `json:"tag_count"`
+	CorrespondentCount     int                         `json:"correspondent_count"`
+	DocumentTypeCount      int                         `json:"document_type_count"`
+	StoragePathCount       int                         `json:"storage_path_count"`
+	CurrentASN             *int                        `json:"current_asn"`
 }
 
 type SuggestionsResponse struct {
@@ -215,16 +256,111 @@ type Workflow struct {
 }
 
 type MailAccount struct {
-	ID       int    `json:"id"`
-	Name     string `json:"name"`
-	Server   string `json:"server"`
-	Port     int    `json:"port"`
-	Username string `json:"username"`
+	ID            int                `json:"id"`
+	Name          string             `json:"name"`
+	ImapServer    string             `json:"imap_server"`
+	ImapPort      int                `json:"imap_port"`
+	ImapSecurity  int                `json:"imap_security"`
+	Username      string             `json:"username"`
+	Password      string             `json:"password"`
+	CharacterSet  string             `json:"character_set"`
+	IsToken       bool               `json:"is_token"`
+	AccountType   int                `json:"account_type"`
+	Owner         *int               `json:"owner"`
+	UserCanChange bool               `json:"user_can_change"`
+	Permissions   *ObjectPermissions `json:"permissions"`
 }
 
 type MailRule struct {
-	ID      int    `json:"id"`
-	Name    string `json:"name"`
-	Account int    `json:"account"`
-	Order   int    `json:"order"`
+	ID                              int                `json:"id"`
+	Name                            string             `json:"name"`
+	Account                         int                `json:"account"`
+	Enabled                         bool               `json:"enabled"`
+	Folder                          string             `json:"folder"`
+	FilterFrom                      string             `json:"filter_from"`
+	FilterTo                        string             `json:"filter_to"`
+	FilterSubject                   string             `json:"filter_subject"`
+	FilterBody                      string             `json:"filter_body"`
+	FilterAttachmentFilenameInclude string             `json:"filter_attachment_filename_include"`
+	FilterAttachmentFilenameExclude string             `json:"filter_attachment_filename_exclude"`
+	MaximumAge                      int                `json:"maximum_age"`
+	Action                          int                `json:"action"`
+	ActionParameter                 string             `json:"action_parameter"`
+	AssignTitleFrom                 int                `json:"assign_title_from"`
+	AssignTags                      []int              `json:"assign_tags"`
+	AssignCorrespondentFrom         int                `json:"assign_correspondent_from"`
+	AssignCorrespondent             *int               `json:"assign_correspondent"`
+	AssignDocumentType              *int               `json:"assign_document_type"`
+	AssignOwnerFromRule             bool               `json:"assign_owner_from_rule"`
+	Order                           int                `json:"order"`
+	AttachmentType                  int                `json:"attachment_type"`
+	ConsumptionScope                int                `json:"consumption_scope"`
+	PdfLayout                       int                `json:"pdf_layout"`
+	StopProcessing                  bool               `json:"stop_processing"`
+	Owner                           *int               `json:"owner"`
+	UserCanChange                   bool               `json:"user_can_change"`
+	Permissions                     *ObjectPermissions `json:"permissions"`
+}
+
+type DocumentHistoryEntry struct {
+	ID        int                    `json:"id"`
+	Actor     map[string]interface{} `json:"actor"`
+	Action    string                 `json:"action"`
+	Timestamp time.Time              `json:"timestamp"`
+	Changes   map[string]interface{} `json:"changes"`
+}
+
+type ShareLinkBundle struct {
+	ID            int        `json:"id"`
+	Slug          string     `json:"slug"`
+	Created       time.Time  `json:"created"`
+	Expiration    *time.Time `json:"expiration"`
+	FileVersion   string     `json:"file_version"`
+	Description   string     `json:"description"`
+	Documents     []int      `json:"documents"`
+	DocumentCount int        `json:"document_count"`
+	Owner         *int       `json:"owner"`
+}
+
+type WorkflowTrigger struct {
+	ID                int    `json:"id"`
+	Sources           []int  `json:"sources"`
+	Type              int    `json:"type"`
+	FilterPath        string `json:"filter_path"`
+	FilterFilename    string `json:"filter_filename"`
+	FilterMailrule    *int   `json:"filter_mailrule"`
+	MatchingAlgorithm int    `json:"matching_algorithm"`
+	Match             string `json:"match"`
+}
+
+type WorkflowAction struct {
+	ID                  int                    `json:"id"`
+	Type                int                    `json:"type"`
+	AssignTitle         string                 `json:"assign_title"`
+	AssignTags          []int                  `json:"assign_tags"`
+	AssignCorrespondent *int                   `json:"assign_correspondent"`
+	AssignDocumentType  *int                   `json:"assign_document_type"`
+	AssignStoragePath   *int                   `json:"assign_storage_path"`
+	AssignOwner         *int                   `json:"assign_owner"`
+	AssignViewUsers     []int                  `json:"assign_view_users"`
+	AssignViewGroups    []int                  `json:"assign_view_groups"`
+	AssignChangeUsers   []int                  `json:"assign_change_users"`
+	AssignChangeGroups  []int                  `json:"assign_change_groups"`
+	AssignCustomFields  []int                  `json:"assign_custom_fields"`
+	Email               map[string]interface{} `json:"email"`
+	Webhook             map[string]interface{} `json:"webhook"`
+}
+
+type ProcessedMail struct {
+	ID        int       `json:"id"`
+	Account   int       `json:"account"`
+	Rule      *int      `json:"rule"`
+	Folder    string    `json:"folder"`
+	UID       string    `json:"uid"`
+	Subject   string    `json:"subject"`
+	Received  time.Time `json:"received"`
+	Processed time.Time `json:"processed"`
+	Status    string    `json:"status"`
+	Error     string    `json:"error"`
+	Owner     *int      `json:"owner"`
 }

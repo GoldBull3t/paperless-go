@@ -332,14 +332,99 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 		wfs = []models.Workflow{}
 	}
 
+	// 7. Storage paths (up to 5)
+	var storPaths []models.StoragePath
+	if query != "" {
+		spArgs := append([]interface{}{likeQuery}, ownerArgs...)
+		rows, err := h.db.Query(fmt.Sprintf(`
+			SELECT id, slug, name, path, match, matching_algorithm, is_insensitive, owner_id
+			FROM storage_paths WHERE name LIKE ?%s ORDER BY name ASC LIMIT 5
+		`, ownerFilter), spArgs...)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var sp models.StoragePath
+				var owner sql.NullInt64
+				if err := rows.Scan(&sp.ID, &sp.Slug, &sp.Name, &sp.Path, &sp.Match, &sp.MatchingAlgorithm, &sp.IsInsensitive, &owner); err == nil {
+					if owner.Valid {
+						o := int(owner.Int64)
+						sp.Owner = &o
+					}
+					sp.UserCanChange = (user == nil || user.IsSuperuser || sp.Owner == nil || *sp.Owner == user.ID)
+					storPaths = append(storPaths, sp)
+				}
+			}
+			_ = rows.Err()
+		}
+	}
+	if storPaths == nil {
+		storPaths = []models.StoragePath{}
+	}
+
+	// 8. Custom fields (up to 5)
+	var customFields []models.CustomField
+	if query != "" {
+		rows, err := h.db.Query(`
+			SELECT id, name, data_type, extra_data FROM custom_fields WHERE name LIKE ? ORDER BY name ASC LIMIT 5
+		`, likeQuery)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var cf models.CustomField
+				var extra string
+				if err := rows.Scan(&cf.ID, &cf.Name, &cf.DataType, &extra); err == nil {
+					_ = json.Unmarshal([]byte(extra), &cf.ExtraData)
+					if cf.ExtraData == nil {
+						cf.ExtraData = make(map[string]interface{})
+					}
+					customFields = append(customFields, cf)
+				}
+			}
+			_ = rows.Err()
+		}
+	}
+	if customFields == nil {
+		customFields = []models.CustomField{}
+	}
+
+	// 9. Users (up to 5, admin only)
+	var usersList []models.User
+	if query != "" && user != nil && user.IsSuperuser {
+		rows, err := h.db.Query(`
+			SELECT id, username, email, first_name, last_name, is_superuser, is_staff, is_active, date_joined
+			FROM users WHERE username LIKE ? ORDER BY username ASC LIMIT 5
+		`, likeQuery)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var u models.User
+				if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.FirstName, &u.LastName, &u.IsSuperuser, &u.IsStaff, &u.IsActive, &u.DateJoined); err == nil {
+					usersList = append(usersList, u)
+				}
+			}
+			_ = rows.Err()
+		}
+	}
+	if usersList == nil {
+		usersList = []models.User{}
+	}
+
+	total := len(docs) + len(views) + len(tags) + len(corrs) + len(dts) + len(storPaths) + len(usersList) + len(wfs) + len(customFields)
+
 	resp := map[string]interface{}{
+		"total":          total,
 		"documents":      docs,
 		"saved_views":    views,
 		"tags":           tags,
 		"correspondents": corrs,
 		"document_types": dts,
-		"workflows":      wfs,
+		"storage_paths":  storPaths,
+		"users":          usersList,
+		"groups":         []interface{}{},
 		"mail_rules":     []interface{}{},
+		"mail_accounts":  []interface{}{},
+		"workflows":      wfs,
+		"custom_fields":  customFields,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -394,7 +479,68 @@ func (h *SearchHandler) Autocomplete(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = rowsT.Err()
 		}
+
+		rowsC, err := h.db.Query(fmt.Sprintf(`SELECT name FROM correspondents WHERE name LIKE ?%s LIMIT 3`, tagOwnerFilter), tagArgs...)
+		if err == nil {
+			defer rowsC.Close()
+			for rowsC.Next() {
+				var name string
+				if err := rowsC.Scan(&name); err == nil {
+					suggestions = append(suggestions, name)
+				}
+			}
+			_ = rowsC.Err()
+		}
+
+		rowsD, err := h.db.Query(fmt.Sprintf(`SELECT name FROM document_types WHERE name LIKE ?%s LIMIT 3`, tagOwnerFilter), tagArgs...)
+		if err == nil {
+			defer rowsD.Close()
+			for rowsD.Next() {
+				var name string
+				if err := rowsD.Scan(&name); err == nil {
+					suggestions = append(suggestions, name)
+				}
+			}
+			_ = rowsD.Err()
+		}
+
+		// Terms from indexed document content
+		rowsContent, err := h.db.Query(fmt.Sprintf(`
+			SELECT content FROM documents
+			WHERE deleted_at IS NULL AND content LIKE ?%s LIMIT 5
+		`, docOwnerFilter), docArgs...)
+		if err == nil {
+			defer rowsContent.Close()
+			lowerTerm := strings.ToLower(term)
+			for rowsContent.Next() {
+				var content string
+				if err := rowsContent.Scan(&content); err == nil {
+					words := strings.Fields(content)
+					for _, word := range words {
+						cleanWord := strings.Trim(word, ".,;:!?\"'()[]{}<>")
+						if strings.HasPrefix(strings.ToLower(cleanWord), lowerTerm) {
+							suggestions = append(suggestions, cleanWord)
+							if len(suggestions) >= 15 {
+								break
+							}
+						}
+					}
+				}
+			}
+		}
 	}
+
+	// Deduplicate suggestions preserving order
+	seen := make(map[string]bool)
+	var unique []string
+	for _, s := range suggestions {
+		trimmed := strings.TrimSpace(s)
+		if trimmed != "" && !seen[trimmed] {
+			seen[trimmed] = true
+			unique = append(unique, trimmed)
+		}
+	}
+	suggestions = unique
 
 	if suggestions == nil {
 		suggestions = []string{}

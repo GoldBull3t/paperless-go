@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,7 +14,6 @@ import (
 	"paperless-go/internal/config"
 	"paperless-go/internal/consumer"
 	"paperless-go/internal/database"
-	"paperless-go/internal/models"
 	"paperless-go/internal/oidc"
 	"paperless-go/internal/queue"
 )
@@ -107,15 +105,7 @@ func NewRouter(
 	scanH := NewScanHandler(cfg, consumer, q)
 	shareLinksH := NewShareLinksHandler(db, cfg)
 	schemaH := NewSchemaHandler()
-
-	emptyPaginated := func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(models.PaginatedResponse{
-			Count:   0,
-			All:     []int{},
-			Results: []interface{}{},
-		})
-	}
+	mailH := NewMailHandler(db)
 
 	// API subrouter
 	apiRouter := func(r chi.Router) {
@@ -123,6 +113,7 @@ func NewRouter(
 		r.Post("/token/", authH.GetToken)
 		r.Get("/auth/oidc/login", authH.OIDCLogin)
 		r.Get("/auth/oidc/callback", authH.OIDCCallback)
+		r.Get("/auth/headless/*", authH.Headless)
 
 		// Authenticated API endpoints
 		r.Group(func(r chi.Router) {
@@ -168,6 +159,14 @@ func NewRouter(
 				r.Post("/delete/", docsH.DeleteDocuments)
 				r.Post("/reprocess/", docsH.ReprocessDocuments)
 				r.Post("/bulk_download/", docsH.BulkDownload)
+				r.Post("/rotate/", docsH.Rotate)
+				r.Post("/merge/", docsH.Merge)
+				r.Post("/merge_as_versions/", docsH.MergeAsVersions)
+				r.Post("/edit_pdf/", docsH.EditPDF)
+				r.Post("/remove_password/", docsH.RemovePassword)
+				r.Post("/email/", docsH.EmailDocuments)
+				r.Post("/email_document/", docsH.EmailDocuments)
+				r.Post("/email_documents/", docsH.EmailDocuments)
 				r.Post("/chat/", docsH.Chat)
 				r.Post("/{id}/extract_metadata/", docsH.ExtractMetadata)
 				r.Get("/{id}/summary/", docsH.Summary)
@@ -182,6 +181,8 @@ func NewRouter(
 				r.Get("/{id}/suggestions/", docsH.Suggestions)
 				r.Get("/{id}/ai_suggestions/", docsH.AISuggestions)
 				r.Get("/{id}/history/", docsH.History)
+				r.Post("/{id}/email/", docsH.EmailDocument)
+				r.Post("/{id}/email_document/", docsH.EmailDocument)
 				r.Get("/{id}/share_links/", shareLinksH.GetForDocument)
 				r.Get("/{id}/notes/", docsH.GetNotes)
 				r.Post("/{id}/notes/", docsH.CreateNote)
@@ -261,16 +262,29 @@ func NewRouter(
 			r.Route("/tasks", func(r chi.Router) {
 				r.Get("/", tasksH.List)
 				r.Get("/status_counts/", tasksH.StatusCounts)
+				r.Get("/active/", tasksH.Active)
+				r.Post("/run/", tasksH.Run)
+				r.Get("/summary/", tasksH.Summary)
 				r.Post("/acknowledge/", tasksH.Acknowledge)
 			})
 
 			// Users, Groups, Workflows, Mail, ShareLinks, Logs, Scan
 			r.Route("/users", func(r chi.Router) {
 				r.Get("/", usersH.List)
+				r.Post("/", usersH.Create)
+				r.Get("/{id}/", usersH.Get)
+				r.Put("/{id}/", usersH.Update)
+				r.Patch("/{id}/", usersH.Update)
+				r.Delete("/{id}/", usersH.Delete)
 				r.Post("/{id}/deactivate_totp/", usersH.DeactivateUserTotp)
 			})
 			r.Route("/groups", func(r chi.Router) {
 				r.Get("/", usersH.ListGroups)
+				r.Post("/", usersH.CreateGroup)
+				r.Get("/{id}/", usersH.GetGroup)
+				r.Put("/{id}/", usersH.UpdateGroup)
+				r.Patch("/{id}/", usersH.UpdateGroup)
+				r.Delete("/{id}/", usersH.DeleteGroup)
 			})
 			r.Route("/workflows", func(r chi.Router) {
 				r.Get("/", workflowsH.List)
@@ -281,22 +295,52 @@ func NewRouter(
 				r.Delete("/{id}/", workflowsH.Delete)
 			})
 			r.Route("/workflow_triggers", func(r chi.Router) {
-				r.Get("/", emptyPaginated)
+				r.Get("/", workflowsH.ListTriggers)
+				r.Post("/", workflowsH.CreateTrigger)
+				r.Get("/{id}/", workflowsH.GetTrigger)
+				r.Put("/{id}/", workflowsH.UpdateTrigger)
+				r.Patch("/{id}/", workflowsH.UpdateTrigger)
+				r.Delete("/{id}/", workflowsH.DeleteTrigger)
 			})
 			r.Route("/workflow_actions", func(r chi.Router) {
-				r.Get("/", emptyPaginated)
+				r.Get("/", workflowsH.ListActions)
+				r.Post("/", workflowsH.CreateAction)
+				r.Get("/{id}/", workflowsH.GetAction)
+				r.Put("/{id}/", workflowsH.UpdateAction)
+				r.Patch("/{id}/", workflowsH.UpdateAction)
+				r.Delete("/{id}/", workflowsH.DeleteAction)
 			})
 			r.Route("/mail_accounts", func(r chi.Router) {
-				r.Get("/", emptyPaginated)
+				r.Get("/", mailH.ListAccounts)
+				r.Post("/", mailH.CreateAccount)
+				r.Get("/{id}/", mailH.GetAccount)
+				r.Put("/{id}/", mailH.UpdateAccount)
+				r.Patch("/{id}/", mailH.UpdateAccount)
+				r.Delete("/{id}/", mailH.DeleteAccount)
 			})
 			r.Route("/mail_rules", func(r chi.Router) {
-				r.Get("/", emptyPaginated)
+				r.Get("/", mailH.ListRules)
+				r.Post("/", mailH.CreateRule)
+				r.Get("/{id}/", mailH.GetRule)
+				r.Put("/{id}/", mailH.UpdateRule)
+				r.Patch("/{id}/", mailH.UpdateRule)
+				r.Delete("/{id}/", mailH.DeleteRule)
+			})
+			r.Route("/processed_mail", func(r chi.Router) {
+				r.Get("/", mailH.ListProcessedMail)
+				r.Delete("/{id}/", mailH.DeleteProcessedMail)
 			})
 			r.Route("/share_links", func(r chi.Router) {
 				r.Get("/", shareLinksH.List)
 				r.Post("/", shareLinksH.Create)
 				r.Get("/{id}/", shareLinksH.Get)
 				r.Delete("/{id}/", shareLinksH.Delete)
+			})
+			r.Route("/share_link_bundles", func(r chi.Router) {
+				r.Get("/", shareLinksH.ListBundles)
+				r.Post("/", shareLinksH.CreateBundle)
+				r.Get("/{id}/", shareLinksH.GetBundle)
+				r.Delete("/{id}/", shareLinksH.DeleteBundle)
 			})
 			r.Route("/logs", func(r chi.Router) {
 				r.Get("/", usersH.ListLogs)

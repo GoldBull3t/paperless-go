@@ -206,6 +206,11 @@ func (c *Consumer) ConsumeFile(srcPath, originalFileName string, opts *ConsumeOp
 		storagePathID = c.matchStoragePath(content, title)
 	}
 
+	// Auto-detect ASN via barcode/text
+	if archiveSerialNumber == nil {
+		archiveSerialNumber = DetectASNFromBarcode(content, "ASN")
+	}
+
 	// Machine learning vector classification fallback (Feature #6)
 	if c.clf != nil {
 		pred := c.clf.Classify(content + " " + title)
@@ -234,6 +239,31 @@ func (c *Consumer) ConsumeFile(srcPath, originalFileName string, opts *ConsumeOp
 	// Detect accurate page count (Feature #3)
 	pageCount := DetectPageCount(srcPath, mimeType)
 
+	// Format storage path template if storage path is set
+	var archiveFileName *string
+	if storagePathID != nil {
+		var pathTmpl string
+		_ = c.db.QueryRow("SELECT path FROM storage_paths WHERE id = ?", *storagePathID).Scan(&pathTmpl)
+		if pathTmpl != "" {
+			var corrName, docTypeName string
+			if correspondentID != nil {
+				_ = c.db.QueryRow("SELECT name FROM correspondents WHERE id = ?", *correspondentID).Scan(&corrName)
+			}
+			if documentTypeID != nil {
+				_ = c.db.QueryRow("SELECT name FROM document_types WHERE id = ?", *documentTypeID).Scan(&docTypeName)
+			}
+			formatted := FormatStoragePath(pathTmpl, title, corrName, docTypeName, created, time.Now(), archiveSerialNumber)
+			if formatted != "" {
+				ext := filepath.Ext(originalFileName)
+				if ext == "" {
+					ext = ".pdf"
+				}
+				fn := formatted + ext
+				archiveFileName = &fn
+			}
+		}
+	}
+
 	// 7. Atomic Transactional Insert with Zstandard compression
 	compressedContent := compress.CompressText(content)
 	tx, err := c.db.Begin()
@@ -245,9 +275,9 @@ func (c *Consumer) ConsumeFile(srcPath, originalFileName string, opts *ConsumeOp
 	res, err := tx.Exec(`
 		INSERT INTO documents (
 			title, content, correspondent_id, document_type_id, storage_path_id,
-			created, modified, added, original_filename, checksum, mime_type, page_count, owner_id, archive_serial_number
-		) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?)
-	`, title, compressedContent, correspondentID, documentTypeID, storagePathID, created, originalFileName, checksum, mimeType, pageCount, ownerID, archiveSerialNumber)
+			created, modified, added, original_filename, archive_filename, checksum, mime_type, page_count, owner_id, archive_serial_number
+		) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?)
+	`, title, compressedContent, correspondentID, documentTypeID, storagePathID, created, originalFileName, archiveFileName, checksum, mimeType, pageCount, ownerID, archiveSerialNumber)
 	if err != nil {
 		return 0, fmt.Errorf("failed to insert document: %w", err)
 	}
@@ -458,7 +488,14 @@ func (c *Consumer) matchStoragePath(content, title string) *int {
 	return nil
 }
 
+func MatchesRule(content, title, match string, algo int, insensitive bool) bool {
+	return matchesRule(content, title, match, algo, insensitive)
+}
+
 func matchesRule(content, title, match string, algo int, insensitive bool) bool {
+	if strings.TrimSpace(match) == "" {
+		return false
+	}
 	text := content + " " + title
 	if insensitive {
 		text = strings.ToLower(text)
@@ -476,18 +513,31 @@ func matchesRule(content, title, match string, algo int, insensitive bool) bool 
 		return false
 	case 2: // All words
 		words := strings.Fields(match)
+		if len(words) == 0 {
+			return false
+		}
 		for _, w := range words {
 			if !strings.Contains(text, w) {
 				return false
 			}
 		}
-		return len(words) > 0
+		return true
 	case 3: // Exact match
 		return strings.Contains(text, match)
 	case 4: // Regular expression
-		re, err := regexp.Compile(match)
+		expr := match
+		if insensitive && !strings.HasPrefix(expr, "(?i)") {
+			expr = "(?i)" + expr
+		}
+		re, err := regexp.Compile(expr)
 		if err == nil {
 			return re.MatchString(text)
+		}
+	case 5: // Fuzzy match
+		// Check if normalized match substring is roughly matched
+		cleanMatch := strings.TrimSpace(match)
+		if len(cleanMatch) > 0 && strings.Contains(text, cleanMatch) {
+			return true
 		}
 	}
 	return false

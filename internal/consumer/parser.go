@@ -154,8 +154,48 @@ func ExtractDocumentDate(text string) *time.Time {
 
 // GenerateArchivePDF attempts to produce a searchable PDF/A using ocrmypdf if available
 func GenerateArchivePDF(inputPath, outputPath string) bool {
+	mode := os.Getenv("PAPERLESS_OCR_MODE")
+	if mode == "" {
+		mode = "skip"
+	}
+	lang := os.Getenv("PAPERLESS_OCR_LANGUAGE")
+	if lang == "" {
+		lang = "por+eng"
+	}
+	clean := os.Getenv("PAPERLESS_OCR_CLEAN") != "none"
+	deskew := os.Getenv("PAPERLESS_OCR_DESKEW") == "true" || os.Getenv("PAPERLESS_OCR_DESKEW") == "1"
+	rotate := os.Getenv("PAPERLESS_OCR_ROTATE_PAGES") == "true" || os.Getenv("PAPERLESS_OCR_ROTATE_PAGES") == "1"
+
+	return GenerateArchivePDFWithConfig(inputPath, outputPath, mode, lang, deskew, rotate, clean)
+}
+
+// GenerateArchivePDFWithConfig produces a searchable PDF/A honoring configurable parameters
+func GenerateArchivePDFWithConfig(inputPath, outputPath, mode, lang string, deskew, rotate, clean bool) bool {
 	if _, err := exec.LookPath("ocrmypdf"); err == nil {
-		cmd := exec.Command("ocrmypdf", "--skip-text", "--clean", "-l", "por+eng", inputPath, outputPath)
+		args := []string{}
+		switch strings.ToLower(mode) {
+		case "redo":
+			args = append(args, "--redo-ocr")
+		case "force":
+			args = append(args, "--force-ocr")
+		default:
+			args = append(args, "--skip-text")
+		}
+		if clean {
+			args = append(args, "--clean")
+		}
+		if deskew {
+			args = append(args, "--deskew")
+		}
+		if rotate {
+			args = append(args, "--rotate-pages")
+		}
+		if lang == "" {
+			lang = "por+eng"
+		}
+		args = append(args, "-l", lang, inputPath, outputPath)
+
+		cmd := exec.Command("ocrmypdf", args...)
 		if err := cmd.Run(); err == nil {
 			if info, err := os.Stat(outputPath); err == nil && info.Size() > 0 {
 				return true

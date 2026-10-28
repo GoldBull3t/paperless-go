@@ -28,6 +28,72 @@ CREATE TABLE IF NOT EXISTS ui_settings (
     settings_json TEXT DEFAULT '{}'
 );
 
+CREATE TABLE IF NOT EXISTS groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_groups (
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    group_id INTEGER REFERENCES groups(id) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, group_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_permissions (
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    permission TEXT NOT NULL,
+    PRIMARY KEY (user_id, permission)
+);
+
+CREATE TABLE IF NOT EXISTS group_permissions (
+    group_id INTEGER REFERENCES groups(id) ON DELETE CASCADE,
+    permission TEXT NOT NULL,
+    PRIMARY KEY (group_id, permission)
+);
+
+CREATE TABLE IF NOT EXISTS mail_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    imap_server TEXT NOT NULL,
+    imap_port INTEGER DEFAULT 993,
+    imap_security INTEGER DEFAULT 2,
+    username TEXT NOT NULL,
+    password TEXT NOT NULL,
+    character_set TEXT DEFAULT 'UTF-8',
+    is_token BOOLEAN DEFAULT 0,
+    account_type INTEGER DEFAULT 1,
+    owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS mail_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    account_id INTEGER REFERENCES mail_accounts(id) ON DELETE CASCADE,
+    enabled BOOLEAN DEFAULT 1,
+    folder TEXT DEFAULT 'INBOX',
+    filter_from TEXT DEFAULT '',
+    filter_to TEXT DEFAULT '',
+    filter_subject TEXT DEFAULT '',
+    filter_body TEXT DEFAULT '',
+    filter_attachment_filename_include TEXT DEFAULT '',
+    filter_attachment_filename_exclude TEXT DEFAULT '',
+    maximum_age INTEGER DEFAULT 30,
+    action INTEGER DEFAULT 1,
+    action_parameter TEXT DEFAULT '',
+    assign_title_from INTEGER DEFAULT 1,
+    assign_tags_json TEXT DEFAULT '[]',
+    assign_correspondent_from INTEGER DEFAULT 1,
+    assign_correspondent_id INTEGER REFERENCES correspondents(id) ON DELETE SET NULL,
+    assign_document_type_id INTEGER REFERENCES document_types(id) ON DELETE SET NULL,
+    assign_owner_from_rule BOOLEAN DEFAULT 1,
+    order_num INTEGER DEFAULT 0,
+    attachment_type INTEGER DEFAULT 1,
+    consumption_scope INTEGER DEFAULT 1,
+    pdf_layout INTEGER DEFAULT 1,
+    stop_processing BOOLEAN DEFAULT 0,
+    owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS correspondents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT UNIQUE NOT NULL,
@@ -87,7 +153,7 @@ CREATE TABLE IF NOT EXISTS documents (
     correspondent_id INTEGER REFERENCES correspondents(id) ON DELETE SET NULL,
     document_type_id INTEGER REFERENCES document_types(id) ON DELETE SET NULL,
     storage_path_id INTEGER REFERENCES storage_paths(id) ON DELETE SET NULL,
-    created DATETIME NOT NULL,
+    created DATETIME DEFAULT CURRENT_TIMESTAMP,
     modified DATETIME DEFAULT CURRENT_TIMESTAMP,
     added DATETIME DEFAULT CURRENT_TIMESTAMP,
     archive_serial_number INTEGER,
@@ -97,6 +163,7 @@ CREATE TABLE IF NOT EXISTS documents (
     mime_type TEXT NOT NULL,
     page_count INTEGER DEFAULT 1,
     owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    root_document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL,
     extracted_metadata_json TEXT DEFAULT '{}',
     deleted_at DATETIME
 );
@@ -170,20 +237,74 @@ CREATE TABLE IF NOT EXISTS workflows (
     actions_json TEXT DEFAULT '[]'
 );
 
-CREATE TABLE IF NOT EXISTS mail_accounts (
+CREATE TABLE IF NOT EXISTS workflow_triggers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    server TEXT NOT NULL,
-    port INTEGER DEFAULT 993,
-    username TEXT NOT NULL,
-    password TEXT NOT NULL
+    workflow_id INTEGER REFERENCES workflows(id) ON DELETE CASCADE,
+    type INTEGER DEFAULT 1,
+    sources_json TEXT DEFAULT '[]',
+    filter_path TEXT DEFAULT '',
+    filter_filename TEXT DEFAULT '',
+    filter_mailrule_id INTEGER,
+    matching_algorithm INTEGER DEFAULT 0,
+    match TEXT DEFAULT ''
 );
 
-CREATE TABLE IF NOT EXISTS mail_rules (
+CREATE TABLE IF NOT EXISTS workflow_actions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
+    workflow_id INTEGER REFERENCES workflows(id) ON DELETE CASCADE,
+    type INTEGER DEFAULT 1,
+    assign_title TEXT DEFAULT '',
+    assign_tags_json TEXT DEFAULT '[]',
+    assign_correspondent_id INTEGER REFERENCES correspondents(id) ON DELETE SET NULL,
+    assign_document_type_id INTEGER REFERENCES document_types(id) ON DELETE SET NULL,
+    assign_storage_path_id INTEGER REFERENCES storage_paths(id) ON DELETE SET NULL,
+    assign_owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    assign_view_users_json TEXT DEFAULT '[]',
+    assign_view_groups_json TEXT DEFAULT '[]',
+    assign_change_users_json TEXT DEFAULT '[]',
+    assign_change_groups_json TEXT DEFAULT '[]',
+    assign_custom_fields_json TEXT DEFAULT '[]',
+    email_json TEXT DEFAULT '{}',
+    webhook_json TEXT DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS document_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER REFERENCES documents(id) ON DELETE CASCADE,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    action TEXT NOT NULL,
+    changes_json TEXT DEFAULT '{}',
+    actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS share_link_bundles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT UNIQUE NOT NULL,
+    description TEXT DEFAULT '',
+    expiration DATETIME,
+    file_version TEXT DEFAULT 'original',
+    created DATETIME DEFAULT CURRENT_TIMESTAMP,
+    owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS share_link_bundle_items (
+    bundle_id INTEGER REFERENCES share_link_bundles(id) ON DELETE CASCADE,
+    document_id INTEGER REFERENCES documents(id) ON DELETE CASCADE,
+    PRIMARY KEY (bundle_id, document_id)
+);
+
+CREATE TABLE IF NOT EXISTS processed_mail (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER REFERENCES mail_accounts(id) ON DELETE CASCADE,
-    order_num INTEGER DEFAULT 0
+    rule_id INTEGER REFERENCES mail_rules(id) ON DELETE SET NULL,
+    folder TEXT NOT NULL,
+    uid TEXT NOT NULL,
+    subject TEXT DEFAULT '',
+    received DATETIME DEFAULT CURRENT_TIMESTAMP,
+    processed DATETIME DEFAULT CURRENT_TIMESTAMP,
+    status TEXT DEFAULT 'SUCCESS',
+    error TEXT DEFAULT '',
+    owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS document_embeddings (

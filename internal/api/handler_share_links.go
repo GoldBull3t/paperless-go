@@ -2,6 +2,7 @@ package api
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -699,5 +700,169 @@ func (h *ShareLinksHandler) PublicAccess(w http.ResponseWriter, r *http.Request)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(landingHtml))
+}
+
+// Share Link Bundles (/api/share_link_bundles/)
+
+func (h *ShareLinksHandler) ListBundles(w http.ResponseWriter, r *http.Request) {
+	rows, err := h.db.Query(`
+		SELECT id, slug, description, expiration, file_version, created, owner_id
+		FROM share_link_bundles
+		ORDER BY created DESC
+	`)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(models.PaginatedResponse{Count: 0, Results: []models.ShareLinkBundle{}})
+		return
+	}
+	defer rows.Close()
+
+	var results []models.ShareLinkBundle
+	var allIDs []int
+	for rows.Next() {
+		var b models.ShareLinkBundle
+		var exp sql.NullTime
+		var owner sql.NullInt64
+		if err := rows.Scan(&b.ID, &b.Slug, &b.Description, &exp, &b.FileVersion, &b.Created, &owner); err == nil {
+			if exp.Valid {
+				b.Expiration = &exp.Time
+			}
+			if owner.Valid {
+				v := int(owner.Int64)
+				b.Owner = &v
+			}
+			docRows, err := h.db.Query("SELECT document_id FROM share_link_bundle_items WHERE bundle_id = ?", b.ID)
+			if err == nil {
+				for docRows.Next() {
+					var docID int
+					if err := docRows.Scan(&docID); err == nil {
+						b.Documents = append(b.Documents, docID)
+					}
+				}
+				docRows.Close()
+			}
+			if b.Documents == nil {
+				b.Documents = []int{}
+			}
+			b.DocumentCount = len(b.Documents)
+			results = append(results, b)
+			allIDs = append(allIDs, b.ID)
+		}
+	}
+	if results == nil {
+		results = []models.ShareLinkBundle{}
+		allIDs = []int{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(models.PaginatedResponse{
+		Count:   len(results),
+		All:     allIDs,
+		Results: results,
+	})
+}
+
+func (h *ShareLinksHandler) GetBundle(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	var b models.ShareLinkBundle
+	var exp sql.NullTime
+	var owner sql.NullInt64
+	err := h.db.QueryRow(`
+		SELECT id, slug, description, expiration, file_version, created, owner_id
+		FROM share_link_bundles WHERE id = ?
+	`, id).Scan(&b.ID, &b.Slug, &b.Description, &exp, &b.FileVersion, &b.Created, &owner)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if exp.Valid {
+		b.Expiration = &exp.Time
+	}
+	if owner.Valid {
+		v := int(owner.Int64)
+		b.Owner = &v
+	}
+	docRows, err := h.db.Query("SELECT document_id FROM share_link_bundle_items WHERE bundle_id = ?", b.ID)
+	if err == nil {
+		for docRows.Next() {
+			var docID int
+			if err := docRows.Scan(&docID); err == nil {
+				b.Documents = append(b.Documents, docID)
+			}
+		}
+		docRows.Close()
+	}
+	if b.Documents == nil {
+		b.Documents = []int{}
+	}
+	b.DocumentCount = len(b.Documents)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(b)
+}
+
+func (h *ShareLinksHandler) CreateBundle(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		DocumentIDs    []int  `json:"document_ids"`
+		FileVersion    string `json:"file_version"`
+		ExpirationDays *int   `json:"expiration_days"`
+		Description    string `json:"description"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if input.FileVersion == "" {
+		input.FileVersion = "original"
+	}
+
+	slugBytes := make([]byte, 16)
+	_, _ = rand.Read(slugBytes)
+	slug := hex.EncodeToString(slugBytes)
+
+	var expiration *time.Time
+	if input.ExpirationDays != nil && *input.ExpirationDays > 0 {
+		exp := time.Now().AddDate(0, 0, *input.ExpirationDays)
+		expiration = &exp
+	}
+
+	user := GetUserFromContext(r.Context())
+	var ownerID *int
+	if user != nil {
+		ownerID = &user.ID
+	}
+
+	res, err := h.db.Exec(`
+		INSERT INTO share_link_bundles (slug, description, expiration, file_version, created, owner_id)
+		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+	`, slug, input.Description, expiration, input.FileVersion, ownerID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	bundleID, _ := res.LastInsertId()
+
+	for _, docID := range input.DocumentIDs {
+		_, _ = h.db.Exec("INSERT OR IGNORE INTO share_link_bundle_items (bundle_id, document_id) VALUES (?, ?)", bundleID, docID)
+	}
+
+	var createdBundle models.ShareLinkBundle
+	createdBundle.ID = int(bundleID)
+	createdBundle.Slug = slug
+	createdBundle.Description = input.Description
+	createdBundle.Expiration = expiration
+	createdBundle.FileVersion = input.FileVersion
+	createdBundle.Created = time.Now()
+	createdBundle.Owner = ownerID
+	createdBundle.Documents = input.DocumentIDs
+	createdBundle.DocumentCount = len(input.DocumentIDs)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(createdBundle)
+}
+
+func (h *ShareLinksHandler) DeleteBundle(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	_, _ = h.db.Exec("DELETE FROM share_link_bundles WHERE id = ?", id)
+	w.WriteHeader(http.StatusNoContent)
 }
 

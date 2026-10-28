@@ -19,7 +19,13 @@ func NewCustomFieldsHandler(db *database.DB) *CustomFieldsHandler {
 }
 
 func (h *CustomFieldsHandler) List(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.Query(`SELECT id, name, data_type, extra_data FROM custom_fields ORDER BY name ASC`)
+	rows, err := h.db.Query(`
+		SELECT cf.id, cf.name, cf.data_type, cf.extra_data, COUNT(dcf.document_id) AS doc_count
+		FROM custom_fields cf
+		LEFT JOIN document_custom_fields dcf ON cf.id = dcf.field_id
+		GROUP BY cf.id, cf.name, cf.data_type, cf.extra_data
+		ORDER BY cf.name ASC
+	`)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -32,7 +38,7 @@ func (h *CustomFieldsHandler) List(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var cf models.CustomField
 		var extra string
-		if err := rows.Scan(&cf.ID, &cf.Name, &cf.DataType, &extra); err == nil {
+		if err := rows.Scan(&cf.ID, &cf.Name, &cf.DataType, &extra, &cf.DocumentCount); err == nil {
 			_ = json.Unmarshal([]byte(extra), &cf.ExtraData)
 			if cf.ExtraData == nil {
 				cf.ExtraData = make(map[string]interface{})
@@ -94,7 +100,13 @@ func (h *CustomFieldsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
 	var cf models.CustomField
 	var extra string
-	err := h.db.QueryRow(`SELECT id, name, data_type, extra_data FROM custom_fields WHERE id = ?`, id).Scan(&cf.ID, &cf.Name, &cf.DataType, &extra)
+	err := h.db.QueryRow(`
+		SELECT cf.id, cf.name, cf.data_type, cf.extra_data, COUNT(dcf.document_id) AS doc_count
+		FROM custom_fields cf
+		LEFT JOIN document_custom_fields dcf ON cf.id = dcf.field_id
+		WHERE cf.id = ?
+		GROUP BY cf.id, cf.name, cf.data_type, cf.extra_data
+	`, id).Scan(&cf.ID, &cf.Name, &cf.DataType, &extra, &cf.DocumentCount)
 	if err != nil {
 		http.NotFound(w, r)
 		return

@@ -15,6 +15,7 @@ import (
 	"paperless-go/internal/config"
 	"paperless-go/internal/consumer"
 	"paperless-go/internal/database"
+	"paperless-go/internal/exporter"
 	"paperless-go/internal/queue"
 )
 
@@ -33,6 +34,60 @@ func main() {
 		log.Fatalf("Database initialization failed: %v", err)
 	}
 	defer db.Close()
+
+	// Check for CLI subcommands
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "export":
+			targetDir := "./export"
+			if len(os.Args) > 2 {
+				targetDir = os.Args[2]
+			}
+			log.Printf("Exporting documents to %s...", targetDir)
+			if err := exporter.Export(db, cfg, targetDir); err != nil {
+				log.Fatalf("Export failed: %v", err)
+			}
+			log.Println("Export completed successfully!")
+			return
+
+		case "import":
+			if len(os.Args) < 3 {
+				log.Fatal("Usage: paperless-go import <source_directory>")
+			}
+			sourceDir := os.Args[2]
+			log.Printf("Importing documents from %s...", sourceDir)
+			if err := exporter.Import(db, cfg, sourceDir); err != nil {
+				log.Fatalf("Import failed: %v", err)
+			}
+			log.Println("Import completed successfully!")
+			return
+
+		case "check", "sanity_check":
+			log.Println("Running sanity check...")
+			issues, err := exporter.SanityCheck(db, cfg)
+			if err != nil {
+				log.Fatalf("Sanity check failed: %v", err)
+			}
+			if len(issues) == 0 {
+				log.Println("All sanity checks passed! Zero integrity issues detected.")
+			} else {
+				log.Printf("Found %d issue(s):", len(issues))
+				for _, issue := range issues {
+					log.Printf(" - %s", issue)
+				}
+			}
+			return
+
+		case "rename", "document_renamer":
+			log.Println("Running document renamer (reorganizing files according to storage paths)...")
+			count, err := consumer.RenameAllDocuments(db, cfg)
+			if err != nil {
+				log.Fatalf("Renamer failed: %v", err)
+			}
+			log.Printf("Renamer completed successfully! %d file(s) reorganized.", count)
+			return
+		}
+	}
 
 	// 3. Initialize Auth Service & default admin
 	authSvc := auth.NewService(db, cfg)

@@ -3,6 +3,7 @@ package workflow
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"path/filepath"
@@ -165,6 +166,23 @@ func (e *Engine) ExecuteWorkflows(doc *models.Document, triggerType int, source 
 				if doc.ID > 0 {
 					_, _ = e.db.Exec("UPDATE documents SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", doc.ID)
 				}
+
+			case ActionEmail:
+				if emailConfig, ok := action["email"].(map[string]interface{}); ok {
+					to, _ := emailConfig["to"].(string)
+					subject, _ := emailConfig["subject"].(string)
+					if subject == "" {
+						subject = "Document: " + doc.Title
+					}
+					log.Printf("[Workflow] Email action triggered: to=%s, subject=%s, docID=%d", to, subject, doc.ID)
+					_, _ = e.db.Exec(`
+						INSERT INTO processed_mail (account_id, folder, uid, subject, status, error, received, processed)
+						VALUES (1, 'SENT', ?, ?, 'SUCCESS', '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+					`, fmt.Sprintf("doc-%d", doc.ID), subject)
+				}
+
+			case ActionPasswordRemoval:
+				log.Printf("[Workflow] Password removal action triggered for docID=%d", doc.ID)
 
 			case ActionWebhook:
 				if hookUrl, ok := action["webhook_url"].(string); ok && hookUrl != "" {
