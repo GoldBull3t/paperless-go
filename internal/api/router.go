@@ -16,6 +16,7 @@ import (
 	"paperless-go/internal/database"
 	"paperless-go/internal/oidc"
 	"paperless-go/internal/queue"
+	"paperless-go/internal/vault"
 )
 
 func NewRouter(
@@ -113,6 +114,9 @@ func NewRouter(
 	schemaH := NewSchemaHandler()
 	mailH := NewMailHandler(db)
 	systemH := NewSystemHandler(db, cfg)
+	vaultMgr := vault.NewVaultManager(db)
+	docsH.SetVaultManager(vaultMgr)
+	vaultH := NewVaultHandler(vaultMgr)
 
 	// API subrouter
 	apiRouter := func(r chi.Router) {
@@ -185,12 +189,14 @@ func NewRouter(
 				r.Get("/{id}/download/", docsH.Download)
 				r.Get("/{id}/thumb/", docsH.Thumb)
 				r.Get("/{id}/metadata/", docsH.Metadata)
+				r.Get("/{id}/duplicates/", docsH.GetDuplicates)
 				r.Get("/{id}/suggestions/", docsH.Suggestions)
 				r.Get("/{id}/ai_suggestions/", docsH.AISuggestions)
 				r.Get("/{id}/history/", docsH.History)
 				r.Post("/{id}/email/", docsH.EmailDocument)
 				r.Post("/{id}/email_document/", docsH.EmailDocument)
 				r.Get("/{id}/share_links/", shareLinksH.GetForDocument)
+				r.Post("/{id}/vault/", vaultH.ToggleDocumentVault)
 				r.Get("/{id}/notes/", docsH.GetNotes)
 				r.Post("/{id}/notes/", docsH.CreateNote)
 				r.Delete("/{id}/notes/", docsH.DeleteNote)
@@ -359,6 +365,14 @@ func NewRouter(
 				r.Get("/scanners/", scanH.GetScanners)
 				r.Post("/scanners/test/", scanH.TestScanner)
 				r.Post("/scan/", scanH.TriggerScan)
+			})
+
+			// Secure Cryptographic Vault (Feature #7)
+			r.Route("/vault", func(r chi.Router) {
+				r.Get("/status/", vaultH.Status)
+				r.Post("/setup/", vaultH.Setup)
+				r.Post("/unlock/", vaultH.Unlock)
+				r.Post("/lock/", vaultH.Lock)
 			})
 
 			// System Integrity, Status, Diagnostics & Online Zero-Downtime Backup

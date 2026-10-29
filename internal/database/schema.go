@@ -165,6 +165,7 @@ CREATE TABLE IF NOT EXISTS documents (
     owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     root_document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL,
     extracted_metadata_json TEXT DEFAULT '{}',
+    is_vault INTEGER DEFAULT 0,
     deleted_at DATETIME
 );
 
@@ -305,6 +306,16 @@ CREATE TABLE IF NOT EXISTS processed_mail (
     status TEXT DEFAULT 'SUCCESS',
     error TEXT DEFAULT '',
     owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS vault_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    is_enabled INTEGER DEFAULT 0,
+    salt_hex TEXT NOT NULL,
+    verifier_hash TEXT NOT NULL,
+    auto_lock_minutes INTEGER DEFAULT 15,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS document_embeddings (

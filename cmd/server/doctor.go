@@ -9,6 +9,7 @@ import (
 	"paperless-go/internal/config"
 	"paperless-go/internal/consumer"
 	"paperless-go/internal/database"
+	"paperless-go/internal/vault"
 )
 
 const (
@@ -23,12 +24,12 @@ const (
 // RunDoctor performs deep diagnostics on the Paperless-Go installation
 func RunDoctor(db *database.DB, cfg *config.Config) bool {
 	fmt.Println()
-	fmt.Printf("%s%s👨‍⚕️  Paperless-Go System Doctor (v3.3.3)%s\n", colorBold, colorCyan, colorReset)
+	fmt.Printf("%s%s👨‍⚕️  Paperless-Go System Doctor (v3.3.5)%s\n", colorBold, colorCyan, colorReset)
 	fmt.Println("==================================================")
 
 	allPassed := true
 	passCount := 0
-	totalChecks := 9
+	totalChecks := 10
 
 	// 1. Runtime Environment
 	fmt.Printf("1. Go Runtime & OS:               ")
@@ -158,6 +159,19 @@ func RunDoctor(db *database.DB, cfg *config.Config) bool {
 		passCount++
 	}
 
+	// 10. Cryptographic Vault Engine
+	fmt.Printf("10. Cryptographic Secure Vault:   ")
+	vm := vault.NewVaultManager(db)
+	if vm != nil {
+		enabled, _, _, vaultCount, _ := vm.Status()
+		if enabled {
+			fmt.Printf("%s[✓] Argon2id vault active (%d protected documents)%s\n", colorGreen, vaultCount, colorReset)
+		} else {
+			fmt.Printf("%s[✓] Argon2id vault engine ready (optional master key)%s\n", colorGreen, colorReset)
+		}
+		passCount++
+	}
+
 	fmt.Println("--------------------------------------------------")
 	if allPassed {
 		fmt.Printf("%s%s✨ Result: %d/%d checks passed. System is in pristine production condition!%s\n\n", colorBold, colorGreen, passCount, totalChecks, colorReset)
@@ -167,3 +181,4 @@ func RunDoctor(db *database.DB, cfg *config.Config) bool {
 
 	return allPassed
 }
+

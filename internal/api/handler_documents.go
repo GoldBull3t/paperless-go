@@ -24,6 +24,7 @@ import (
 	"paperless-go/internal/database"
 	"paperless-go/internal/models"
 	"paperless-go/internal/queue"
+	"paperless-go/internal/vault"
 	"paperless-go/internal/workflow"
 )
 
@@ -33,6 +34,11 @@ type DocumentsHandler struct {
 	consumer *consumer.Consumer
 	queue    *queue.Queue
 	wsHub    *WebSocketHub
+	vm       *vault.VaultManager
+}
+
+func (h *DocumentsHandler) SetVaultManager(vm *vault.VaultManager) {
+	h.vm = vm
 }
 
 func NewDocumentsHandler(db *database.DB, cfg *config.Config, c *consumer.Consumer, q *queue.Queue, ws *WebSocketHub) *DocumentsHandler {
@@ -410,7 +416,7 @@ func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
 	pageQuery := fmt.Sprintf(`
 		SELECT d.id, d.title, d.content, d.correspondent_id, d.document_type_id, d.storage_path_id,
 		       d.created, d.modified, d.added, d.archive_serial_number, d.original_filename, d.archive_filename,
-		       d.mime_type, d.owner_id, d.page_count
+		       d.mime_type, d.owner_id, d.page_count, d.is_vault
 		FROM documents d %s %s LIMIT ? OFFSET ?
 	`, whereClause, orderClause)
 
@@ -425,14 +431,20 @@ func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
 	var results []models.Document
 	for rows.Next() {
 		var doc models.Document
-		var corr, docType, storPath, owner, asn sql.NullInt64
+		var corr, docType, storPath, owner, asn, isVault sql.NullInt64
 		var archFile sql.NullString
 
 		if err := rows.Scan(
 			&doc.ID, &doc.Title, &doc.Content, &corr, &docType, &storPath,
 			&doc.Created, &doc.Modified, &doc.Added, &asn, &doc.OriginalFileName, &archFile,
-			&doc.MimeType, &owner, &doc.PageCount,
+			&doc.MimeType, &owner, &doc.PageCount, &isVault,
 		); err == nil {
+			if isVault.Valid && isVault.Int64 == 1 {
+				doc.IsVault = true
+				if h.vm != nil && !h.vm.IsUnlocked() {
+					doc.Content = "[VAULT PROTECTED - UNLOCK TO VIEW]"
+				}
+			}
 			if corr.Valid {
 				c := int(corr.Int64)
 				doc.Correspondent = &c
@@ -573,6 +585,15 @@ func (h *DocumentsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var isVault int
+	_ = h.db.QueryRow("SELECT is_vault FROM documents WHERE id = ?", id).Scan(&isVault)
+	if isVault == 1 && (h.vm != nil && !h.vm.IsUnlocked()) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusLocked)
+		_, _ = w.Write([]byte(`{"detail": "This document is stored in the secure vault. Please unlock the vault to access it."}`))
+		return
+	}
+
 	user := GetUserFromContext(r.Context())
 	doc, err := h.fetchDocumentWithUser(id, user)
 	if err != nil {
@@ -595,6 +616,15 @@ func (h *DocumentsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
+	var isVault int
+	_ = h.db.QueryRow("SELECT is_vault FROM documents WHERE id = ?", id).Scan(&isVault)
+	if isVault == 1 && (h.vm != nil && !h.vm.IsUnlocked()) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusLocked)
+		_, _ = w.Write([]byte(`{"detail": "This document is stored in the secure vault. Please unlock the vault to access it."}`))
 		return
 	}
 
@@ -708,6 +738,15 @@ func (h *DocumentsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
+	var isVault int
+	_ = h.db.QueryRow("SELECT is_vault FROM documents WHERE id = ?", id).Scan(&isVault)
+	if isVault == 1 && (h.vm != nil && !h.vm.IsUnlocked()) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusLocked)
+		_, _ = w.Write([]byte(`{"detail": "This document is stored in the secure vault. Please unlock the vault to access it."}`))
 		return
 	}
 
@@ -881,6 +920,15 @@ func (h *DocumentsHandler) History(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var isVault int
+	_ = h.db.QueryRow("SELECT is_vault FROM documents WHERE id = ?", id).Scan(&isVault)
+	if isVault == 1 && (h.vm != nil && !h.vm.IsUnlocked()) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusLocked)
+		_, _ = w.Write([]byte(`{"detail": "This document is stored in the secure vault. Please unlock the vault to access it."}`))
+		return
+	}
+
 	rows, err := h.db.Query(`
 		SELECT dh.id, dh.action, dh.timestamp, dh.changes_json, u.id, u.username
 		FROM document_history dh
@@ -935,6 +983,15 @@ func (h *DocumentsHandler) AISuggestions(w http.ResponseWriter, r *http.Request)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
+	var isVault int
+	_ = h.db.QueryRow("SELECT is_vault FROM documents WHERE id = ?", id).Scan(&isVault)
+	if isVault == 1 && (h.vm != nil && !h.vm.IsUnlocked()) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusLocked)
+		_, _ = w.Write([]byte(`{"detail": "This document is stored in the secure vault. Please unlock the vault to access it."}`))
 		return
 	}
 
@@ -1360,6 +1417,73 @@ func (h *DocumentsHandler) CheckDuplicate(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// GetDuplicates (/api/documents/{id}/duplicates/) returns all exact and fuzzy duplicates with similarity scores
+func (h *DocumentsHandler) GetDuplicates(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	exists, allowed := h.checkDocumentAccess(r, id)
+	if !exists {
+		http.NotFound(w, r)
+		return
+	}
+	if !allowed {
+		http.Error(w, `{"detail": "Forbidden"}`, http.StatusForbidden)
+		return
+	}
+
+	var checksum, content string
+	_ = h.db.QueryRow("SELECT checksum, content FROM documents WHERE id = ?", id).Scan(&checksum, &content)
+	content = compress.DecompressText(content)
+
+	var results []consumer.FuzzyDuplicateMatch
+
+	// 1. Exact checksum duplicates
+	if checksum != "" {
+		rows, err := h.db.Query("SELECT id, title, original_filename FROM documents WHERE checksum = ? AND id != ? AND deleted_at IS NULL", checksum, id)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var dupID int
+				var title, origName string
+				if err := rows.Scan(&dupID, &title, &origName); err == nil {
+					results = append(results, consumer.FuzzyDuplicateMatch{
+						ID:               dupID,
+						Title:            title,
+						Similarity:       1.0,
+						Reason:           "exact_checksum",
+						OriginalFileName: origName,
+					})
+				}
+			}
+		}
+	}
+
+	// 2. Fuzzy text duplicates (threshold 0.85)
+	if content != "" {
+		fuzzyMatches, err := consumer.FindFuzzyDuplicates(h.db, id, content, 0.85)
+		if err == nil {
+			for _, fm := range fuzzyMatches {
+				alreadyAdded := false
+				for _, res := range results {
+					if res.ID == fm.ID {
+						alreadyAdded = true
+						break
+					}
+				}
+				if !alreadyAdded {
+					results = append(results, fm)
+				}
+			}
+		}
+	}
+
+	if results == nil {
+		results = []consumer.FuzzyDuplicateMatch{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(results)
+}
+
 func (h *DocumentsHandler) Preview(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
 	exists, allowed := h.checkDocumentAccess(r, id)
@@ -1371,6 +1495,15 @@ func (h *DocumentsHandler) Preview(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
+	var isVault int
+	_ = h.db.QueryRow("SELECT is_vault FROM documents WHERE id = ?", id).Scan(&isVault)
+	if isVault == 1 && (h.vm != nil && !h.vm.IsUnlocked()) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusLocked)
+		_, _ = w.Write([]byte(`{"detail": "This document is stored in the secure vault. Please unlock the vault to access it."}`))
 		return
 	}
 
@@ -1403,6 +1536,15 @@ func (h *DocumentsHandler) Download(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
+	var isVault int
+	_ = h.db.QueryRow("SELECT is_vault FROM documents WHERE id = ?", id).Scan(&isVault)
+	if isVault == 1 && (h.vm != nil && !h.vm.IsUnlocked()) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusLocked)
+		_, _ = w.Write([]byte(`{"detail": "This document is stored in the secure vault. Please unlock the vault to access it."}`))
 		return
 	}
 
@@ -1449,6 +1591,15 @@ func (h *DocumentsHandler) Thumb(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
+	var isVault int
+	_ = h.db.QueryRow("SELECT is_vault FROM documents WHERE id = ?", id).Scan(&isVault)
+	if isVault == 1 && (h.vm != nil && !h.vm.IsUnlocked()) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusLocked)
+		_, _ = w.Write([]byte(`{"detail": "This document is stored in the secure vault. Please unlock the vault to access it."}`))
 		return
 	}
 
@@ -1528,6 +1679,15 @@ func (h *DocumentsHandler) Metadata(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var isVault int
+	_ = h.db.QueryRow("SELECT is_vault FROM documents WHERE id = ?", id).Scan(&isVault)
+	if isVault == 1 && (h.vm != nil && !h.vm.IsUnlocked()) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusLocked)
+		_, _ = w.Write([]byte(`{"detail": "This document is stored in the secure vault. Please unlock the vault to access it."}`))
+		return
+	}
+
 	filePath, mimeType, err := h.getOriginalFilePath(id)
 	if err != nil {
 		http.NotFound(w, r)
@@ -1595,6 +1755,15 @@ func (h *DocumentsHandler) Suggestions(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
+	var isVault int
+	_ = h.db.QueryRow("SELECT is_vault FROM documents WHERE id = ?", id).Scan(&isVault)
+	if isVault == 1 && (h.vm != nil && !h.vm.IsUnlocked()) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusLocked)
+		_, _ = w.Write([]byte(`{"detail": "This document is stored in the secure vault. Please unlock the vault to access it."}`))
 		return
 	}
 	doc, err := h.fetchDocument(id)
@@ -1727,6 +1896,15 @@ func (h *DocumentsHandler) GetNotes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var isVault int
+	_ = h.db.QueryRow("SELECT is_vault FROM documents WHERE id = ?", id).Scan(&isVault)
+	if isVault == 1 && (h.vm != nil && !h.vm.IsUnlocked()) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusLocked)
+		_, _ = w.Write([]byte(`{"detail": "This document is stored in the secure vault. Please unlock the vault to access it."}`))
+		return
+	}
+
 	notes := h.getDocNotes(id)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1744,6 +1922,15 @@ func (h *DocumentsHandler) CreateNote(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte(`{"detail": "You do not have permission to perform this action."}`))
+		return
+	}
+
+	var isVault int
+	_ = h.db.QueryRow("SELECT is_vault FROM documents WHERE id = ?", id).Scan(&isVault)
+	if isVault == 1 && (h.vm != nil && !h.vm.IsUnlocked()) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusLocked)
+		_, _ = w.Write([]byte(`{"detail": "This document is stored in the secure vault. Please unlock the vault to access it."}`))
 		return
 	}
 
@@ -2312,6 +2499,23 @@ func (h *DocumentsHandler) fetchDocumentWithUser(id int, user *models.User) (*mo
 				}
 			}
 			_ = rowsDup.Err()
+		}
+	}
+	// Fuzzy duplicate detection (>90% text similarity)
+	if doc.Content != "" {
+		if fMatches, err := consumer.FindFuzzyDuplicates(h.db, doc.ID, doc.Content, 0.90); err == nil {
+			for _, fm := range fMatches {
+				isAlreadyIn := false
+				for _, existingID := range doc.DuplicateDocuments {
+					if existingID == fm.ID {
+						isAlreadyIn = true
+						break
+					}
+				}
+				if !isAlreadyIn {
+					doc.DuplicateDocuments = append(doc.DuplicateDocuments, fm.ID)
+				}
+			}
 		}
 	}
 	doc.Versions = []models.DocumentVersionInfo{}

@@ -74,6 +74,12 @@ func (p *PDFProcessor) DecryptPDF(inFile, outFile string, password string) error
 	})
 }
 
+// TrimPDF creates a new PDF containing only the selected pages (e.g. ["1", "2"] or ["1-3"])
+func (p *PDFProcessor) TrimPDF(inFile, outFile string, selectedPages []string) error {
+	conf := model.NewDefaultConfiguration()
+	return api.TrimFile(inFile, outFile, selectedPages, conf)
+}
+
 // GetPageCount returns the physical number of pages in a PDF file
 func (p *PDFProcessor) GetPageCount(filePath string) (int, error) {
 	return api.PageCountFile(filePath)

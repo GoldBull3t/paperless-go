@@ -158,6 +158,7 @@ type Document struct {
 	Versions            []DocumentVersionInfo      `json:"versions"`
 	ExtractedMetadata   interface{}                `json:"extracted_metadata,omitempty"`
 	SearchHit           interface{}                `json:"__search_hit__,omitempty"`
+	IsVault             bool                       `json:"is_vault"`
 	DeletedAt           *time.Time                 `json:"deleted_at,omitempty"`
 }
 

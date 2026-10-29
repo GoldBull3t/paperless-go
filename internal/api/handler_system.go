@@ -57,7 +57,7 @@ func (h *SystemHandler) SystemStatus(w http.ResponseWriter, r *http.Request) {
 
 	status := map[string]interface{}{
 		"status":                "healthy",
-		"version":               "3.3.3",
+		"version":               "3.3.5",
 		"engine":                "paperless-go",
 		"uptime_seconds":        uptimeSec,
 		"uptime_human":          time.Since(startTime).Truncate(time.Second).String(),
@@ -107,7 +107,7 @@ func (h *SystemHandler) SystemDiagnostics(w http.ResponseWriter, r *http.Request
 
 	diag := map[string]interface{}{
 		"timestamp":      time.Now().UTC().Format(time.RFC3339),
-		"version":        "3.3.3",
+		"version":        "3.3.5",
 		"go_runtime":     runtime.Version(),
 		"num_cpu":        runtime.NumCPU(),
 		"num_goroutines": runtime.NumGoroutine(),
@@ -154,7 +154,7 @@ func (h *SystemHandler) PrometheusMetrics(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	out := fmt.Sprintf(`# HELP paperless_go_info Information about Paperless-Go instance
 # TYPE paperless_go_info gauge
-paperless_go_info{version="3.3.3",go="%s",os="%s",arch="%s"} 1
+paperless_go_info{version="3.3.5",go="%s",os="%s",arch="%s"} 1
 
 # HELP paperless_go_uptime_seconds Server uptime in seconds
 # TYPE paperless_go_uptime_seconds counter
@@ -203,3 +203,4 @@ func testDirWritable(dir string) bool {
 	_ = os.Remove(tmpName)
 	return true
 }
+

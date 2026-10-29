@@ -77,3 +77,4 @@ func TestSystemEndpoints(t *testing.T) {
 		t.Fatalf("expected 200 OK from SystemDiagnostics, got %d: %s", wDiag.Code, wDiag.Body.String())
 	}
 }
+
