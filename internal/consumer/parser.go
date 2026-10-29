@@ -223,7 +223,12 @@ func isLegitimateText(s string) bool {
 // DetectPageCount detects the number of pages in a document
 func DetectPageCount(filePath, mimeType string) int {
 	if strings.Contains(mimeType, "pdf") {
-		// 1. Try pdfinfo if available
+		// 1. Pure Go PDF analysis via pdfcpu
+		if count, err := NewPDFProcessor().GetPageCount(filePath); err == nil && count > 0 {
+			return count
+		}
+
+		// 2. Try pdfinfo if available
 		if _, err := exec.LookPath("pdfinfo"); err == nil {
 			cmd := exec.Command("pdfinfo", filePath)
 			if out, err := cmd.Output(); err == nil {
@@ -236,7 +241,7 @@ func DetectPageCount(filePath, mimeType string) int {
 			}
 		}
 
-		// 2. Native PDF scan for /Type /Page
+		// 3. Native PDF scan for /Type /Page
 		data, err := os.ReadFile(filePath)
 		if err == nil {
 			pageRegex := regexp.MustCompile(`/Type\s*/Page\b`)

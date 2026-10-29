@@ -161,6 +161,13 @@ type Document struct {
 	DeletedAt           *time.Time                 `json:"deleted_at,omitempty"`
 }
 
+type SearchHit struct {
+	Score          float64  `json:"score"`
+	Highlights     []string `json:"highlights"`
+	NoteHighlights []string `json:"note_highlights"`
+	Rank           int      `json:"rank,omitempty"`
+}
+
 type SavedViewFilterRule struct {
 	RuleType int    `json:"rule_type"`
 	Value    string `json:"value"`

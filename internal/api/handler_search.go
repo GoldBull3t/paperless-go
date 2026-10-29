@@ -155,9 +155,6 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 						doc.ArchivedFileName = &archFile.String
 					}
 					doc.Content = compress.DecompressText(doc.Content)
-					if len(doc.Content) > 100 {
-						doc.Content = doc.Content[:100] + "..."
-					}
 					doc.CreatedDate = doc.Created.Format("2006-01-02")
 					doc.UserCanChange = (user == nil || user.IsSuperuser || doc.Owner == nil || *doc.Owner == user.ID)
 					doc.IsSharedByRequester = (user != nil && doc.Owner != nil && *doc.Owner == user.ID)
@@ -166,6 +163,19 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 					doc.Tags = []int{}
 					docs = append(docs, doc)
 				}
+			}
+		}
+
+		// Build visual search highlights matching Tantivy / Angular UI
+		docPtrs := make([]*models.Document, len(docs))
+		for i := range docs {
+			docPtrs[i] = &docs[i]
+		}
+		BuildSearchHits(h.db, docPtrs, query)
+
+		for i := range docs {
+			if len(docs[i].Content) > 100 {
+				docs[i].Content = docs[i].Content[:100] + "..."
 			}
 		}
 	}
