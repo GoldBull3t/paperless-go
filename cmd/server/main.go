@@ -38,6 +38,26 @@ func main() {
 	// Check for CLI subcommands
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "doctor", "--doctor", "-d":
+			if !RunDoctor(db, cfg) {
+				os.Exit(1)
+			}
+			return
+
+		case "migrate-ngx", "migrate":
+			sourceDir := "./export"
+			if len(os.Args) > 2 {
+				sourceDir = os.Args[2]
+			}
+			log.Printf("🚀 Starting 1-Click Migration from Paperless-ngx (%s)...", sourceDir)
+			if err := exporter.Import(db, cfg, sourceDir); err != nil {
+				log.Fatalf("Migration failed: %v", err)
+			}
+			var count int
+			_ = db.QueryRow("SELECT COUNT(*) FROM documents").Scan(&count)
+			log.Printf("✨ Migration completed successfully! %d document(s) imported and indexed in FTS5.", count)
+			return
+
 		case "export":
 			targetDir := "./export"
 			if len(os.Args) > 2 {

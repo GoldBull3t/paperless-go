@@ -220,6 +220,17 @@ func isLegitimateText(s string) bool {
 	return ratio > 0.85
 }
 
+// DetectOCREngine checks if an external OCR engine is installed
+func DetectOCREngine() string {
+	if _, err := exec.LookPath("ocrmypdf"); err == nil {
+		return "OCRmyPDF + Tesseract"
+	}
+	if _, err := exec.LookPath("tesseract"); err == nil {
+		return "Tesseract OCR"
+	}
+	return "none"
+}
+
 // DetectPageCount detects the number of pages in a document
 func DetectPageCount(filePath, mimeType string) int {
 	if strings.Contains(mimeType, "pdf") {

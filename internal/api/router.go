@@ -34,6 +34,12 @@ func NewRouter(
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(SecurityHeadersMiddleware)
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			IncrementRequestCount()
+			next.ServeHTTP(w, r)
+		})
+	})
 
 	// Secure CORS configuration
 	var allowedOrigins []string
@@ -106,6 +112,7 @@ func NewRouter(
 	shareLinksH := NewShareLinksHandler(db, cfg)
 	schemaH := NewSchemaHandler()
 	mailH := NewMailHandler(db)
+	systemH := NewSystemHandler(db, cfg)
 
 	// API subrouter
 	apiRouter := func(r chi.Router) {
@@ -354,7 +361,9 @@ func NewRouter(
 				r.Post("/scan/", scanH.TriggerScan)
 			})
 
-			// System Integrity & Online Zero-Downtime Backup
+			// System Integrity, Status, Diagnostics & Online Zero-Downtime Backup
+			r.Get("/system/status/", systemH.SystemStatus)
+			r.Get("/system/diagnostics/", systemH.SystemDiagnostics)
 			r.Get("/system/integrity/", docsH.SystemIntegrityCheck)
 			r.Get("/system/backup/", docsH.SystemBackup)
 
@@ -386,6 +395,9 @@ func NewRouter(
 	r.HandleFunc("/ws/", wsHub.HandleWS)
 	r.HandleFunc("/{lang:[a-z]{2}-[A-Z]{2}}/ws/status/", wsHub.HandleWS)
 	r.HandleFunc("/{lang:[a-z]{2}-[A-Z]{2}}/ws/", wsHub.HandleWS)
+
+	// Live Prometheus Metrics (/metrics)
+	r.Get("/metrics", systemH.PrometheusMetrics)
 
 	// Intercept legacy Django admin routes and redirect to home (no Django in paperless-go)
 	adminRedirect := func(w http.ResponseWriter, r *http.Request) {

@@ -382,6 +382,79 @@ func Import(db *database.DB, cfg *config.Config, sourceDir string) error {
 				ON CONFLICT(id) DO UPDATE SET name = excluded.name, path = excluded.path
 			`, item.PK, name, path, match, algo, ins)
 
+		case "documents.customfield":
+			name, _ := item.Fields["name"].(string)
+			dataType, _ := item.Fields["data_type"].(string)
+			extraBytes, _ := json.Marshal(item.Fields["extra_data"])
+			_, _ = db.Exec(`
+				INSERT INTO custom_fields (id, name, data_type, extra_data)
+				VALUES (?, ?, ?, ?)
+				ON CONFLICT(id) DO UPDATE SET name = excluded.name, data_type = excluded.data_type, extra_data = excluded.extra_data
+			`, item.PK, name, dataType, string(extraBytes))
+
+		case "documents.customfieldinstance":
+			var fieldID, docID int
+			if f, ok := item.Fields["field"].(float64); ok {
+				fieldID = int(f)
+			}
+			if d, ok := item.Fields["document"].(float64); ok {
+				docID = int(d)
+			}
+			var valStr, valDate *string
+			var valNum *float64
+			var valBool *bool
+			if v, ok := item.Fields["value_text"].(string); ok {
+				valStr = &v
+			} else if v, ok := item.Fields["value_url"].(string); ok {
+				valStr = &v
+			}
+			if v, ok := item.Fields["value_date"].(string); ok {
+				valDate = &v
+			}
+			if v, ok := item.Fields["value_int"].(float64); ok {
+				valNum = &v
+			} else if v, ok := item.Fields["value_float"].(float64); ok {
+				valNum = &v
+			} else if v, ok := item.Fields["value_monetary"].(float64); ok {
+				valNum = &v
+			}
+			if v, ok := item.Fields["value_bool"].(bool); ok {
+				valBool = &v
+			}
+			if fieldID > 0 && docID > 0 {
+				_, _ = db.Exec(`
+					INSERT INTO document_custom_fields (document_id, custom_field_id, value_text, value_bool, value_date, value_number)
+					VALUES (?, ?, ?, ?, ?, ?)
+					ON CONFLICT(document_id, custom_field_id) DO UPDATE SET value_text = excluded.value_text, value_bool = excluded.value_bool, value_date = excluded.value_date, value_number = excluded.value_number
+				`, docID, fieldID, valStr, valBool, valDate, valNum)
+			}
+
+		case "documents.note":
+			var docID int
+			if d, ok := item.Fields["document"].(float64); ok {
+				docID = int(d)
+			}
+			noteText, _ := item.Fields["note"].(string)
+			var uID *int
+			if u, ok := item.Fields["user"].(float64); ok && int(u) > 0 {
+				ui := int(u)
+				uID = &ui
+			}
+			createdTime := time.Now()
+			if crStr, ok := item.Fields["created"].(string); ok && crStr != "" {
+				if t, err := time.Parse(time.RFC3339, crStr); err == nil {
+					createdTime = t
+				} else if t, err := time.Parse("2006-01-02T15:04:05Z", crStr); err == nil {
+					createdTime = t
+				}
+			}
+			if docID > 0 && noteText != "" {
+				_, _ = db.Exec(`
+					INSERT INTO document_notes (document_id, note, created, user_id)
+					VALUES (?, ?, ?, ?)
+				`, docID, noteText, createdTime, uID)
+			}
+
 		case "documents.document":
 			title, _ := item.Fields["title"].(string)
 			content, _ := item.Fields["content"].(string)
@@ -391,6 +464,39 @@ func Import(db *database.DB, cfg *config.Config, sourceDir string) error {
 			pageCount := 1
 			if pc, ok := item.Fields["page_count"].(float64); ok {
 				pageCount = int(pc)
+			}
+
+			var corrID, docTypeID, storPathID, asn, ownerID *int
+			if c, ok := item.Fields["correspondent"].(float64); ok && int(c) > 0 {
+				ci := int(c)
+				corrID = &ci
+			}
+			if dt, ok := item.Fields["document_type"].(float64); ok && int(dt) > 0 {
+				dti := int(dt)
+				docTypeID = &dti
+			}
+			if sp, ok := item.Fields["storage_path"].(float64); ok && int(sp) > 0 {
+				spi := int(sp)
+				storPathID = &spi
+			}
+			if a, ok := item.Fields["archive_serial_number"].(float64); ok && int(a) > 0 {
+				ai := int(a)
+				asn = &ai
+			}
+			if o, ok := item.Fields["owner"].(float64); ok && int(o) > 0 {
+				oi := int(o)
+				ownerID = &oi
+			}
+
+			createdTime := time.Now()
+			if crStr, ok := item.Fields["created"].(string); ok && crStr != "" {
+				if t, err := time.Parse(time.RFC3339, crStr); err == nil {
+					createdTime = t
+				} else if t, err := time.Parse("2006-01-02T15:04:05Z", crStr); err == nil {
+					createdTime = t
+				} else if t, err := time.Parse("2006-01-02", crStr); err == nil {
+					createdTime = t
+				}
 			}
 
 			// Restore files
@@ -408,10 +514,21 @@ func Import(db *database.DB, cfg *config.Config, sourceDir string) error {
 			_ = copyFile(srcThumb, destThumb)
 
 			_, _ = db.Exec(`
-				INSERT INTO documents (id, title, content, original_filename, checksum, mime_type, page_count, created, modified, added)
-				VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-				ON CONFLICT(id) DO UPDATE SET title = excluded.title, content = excluded.content
-			`, item.PK, title, content, origName, checksum, mimeType, pageCount)
+				INSERT INTO documents (
+					id, title, content, original_filename, checksum, mime_type, page_count,
+					correspondent_id, document_type_id, storage_path_id, archive_serial_number, owner_id,
+					created, modified, added
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+				ON CONFLICT(id) DO UPDATE SET
+					title = excluded.title,
+					content = excluded.content,
+					correspondent_id = excluded.correspondent_id,
+					document_type_id = excluded.document_type_id,
+					storage_path_id = excluded.storage_path_id,
+					archive_serial_number = excluded.archive_serial_number,
+					owner_id = excluded.owner_id
+			`, item.PK, title, content, origName, checksum, mimeType, pageCount, corrID, docTypeID, storPathID, asn, ownerID, createdTime)
 
 			_, _ = db.Exec("INSERT OR REPLACE INTO documents_fts (rowid, title, content) VALUES (?, ?, ?)", item.PK, title, content)
 
