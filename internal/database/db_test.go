@@ -126,3 +126,28 @@ func TestDB_Maintenance(t *testing.T) {
 	cancel()
 }
 
+func TestVersionedMigrations(t *testing.T) {
+	db, tmpDir := setupTestDB(t)
+	defer os.RemoveAll(tmpDir)
+	defer db.Close()
+
+	records, err := db.GetAppliedMigrations()
+	if err != nil {
+		t.Fatalf("GetAppliedMigrations failed: %v", err)
+	}
+
+	if len(records) < 3 {
+		t.Fatalf("expected at least 3 applied migrations, got %d", len(records))
+	}
+
+	if records[0].Version != 1 || records[0].Name != "0001_initial_schema" {
+		t.Errorf("unexpected migration 1: %+v", records[0])
+	}
+	if records[1].Version != 2 || records[1].Name != "0002_backward_compat_columns" {
+		t.Errorf("unexpected migration 2: %+v", records[1])
+	}
+	if records[2].Version != 3 || records[2].Name != "0003_tasks_persistence_and_retries" {
+		t.Errorf("unexpected migration 3: %+v", records[2])
+	}
+}
+

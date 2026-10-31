@@ -34,14 +34,22 @@ RUN apk add --no-cache \
     tesseract-ocr-data-por \
     tesseract-ocr-data-eng
 
+# Create unprivileged user and group for security hardening
+RUN addgroup -g 1000 -S appgroup && \
+    adduser -u 1000 -S appuser -G appgroup -h /app -s /bin/sh
+
 WORKDIR /app
 
 # Copy compiled Go binary and web static assets (Angular SPA)
 COPY --from=builder /app/paperless-go /app/paperless-go
 COPY web /app/web
 
-# Create required runtime data, media, and consume directories
-RUN mkdir -p /app/data /app/media /app/consume
+# Create required runtime data, media, and consume directories with correct ownership
+RUN mkdir -p /app/data /app/media /app/consume && \
+    chown -R appuser:appgroup /app
+
+# Run as non-privileged user
+USER appuser
 
 # Environment defaults
 ENV PAPERLESS_PORT=8000

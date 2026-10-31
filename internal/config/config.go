@@ -34,6 +34,11 @@ type Config struct {
 	AIEmbeddingModel   string
 	AIExtractOnConsume bool
 
+	// Initial Admin Credentials (Optional - if omitted, a secure random password is generated on first boot)
+	AdminUser     string
+	AdminPassword string
+	AdminEmail    string
+
 	// Security & Integrity Configuration
 	EncryptionAtRest bool
 	EncryptionKey    string
@@ -97,6 +102,11 @@ func Load() *Config {
 	aiEmbModel := getEnv("PAPERLESS_AI_EMBEDDING_MODEL", "")
 	aiExtractOnConsume := getEnv("PAPERLESS_AI_EXTRACT_ON_CONSUME", "true") == "true"
 
+	// Admin Credentials
+	adminUser := getEnv("PAPERLESS_ADMIN_USER", "")
+	adminPass := getEnv("PAPERLESS_ADMIN_PASSWORD", "")
+	adminEmail := getEnv("PAPERLESS_ADMIN_EMAIL", "admin@paperless.local")
+
 	// Security & Encryption
 	encAtRest := getEnv("PAPERLESS_ENCRYPTION_AT_REST", "false") == "true"
 	encKey := getEnv("PAPERLESS_ENCRYPTION_KEY", secret)
@@ -139,6 +149,9 @@ func Load() *Config {
 		AIModel:            aiModel,
 		AIEmbeddingModel:   aiEmbModel,
 		AIExtractOnConsume: aiExtractOnConsume,
+		AdminUser:          adminUser,
+		AdminPassword:      adminPass,
+		AdminEmail:         adminEmail,
 		OIDCEnabled:        oidcEnabled,
 		OIDCProviderName:   oidcProviderName,
 		OIDCClientID:       oidcClientID,

@@ -101,3 +101,59 @@ func TestQueue_GracefulShutdown(t *testing.T) {
 	cancel()
 	q.Close()
 }
+
+func TestQueue_PersistentTaskRecovery(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "paperless-queue-recover-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := database.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	// 1. Simulate an interrupted task left in STARTED status
+	_, err = db.Exec(`
+		INSERT INTO tasks (task_id, type, status, task_name, task_file_name, payload_json, attempt_count, max_attempts)
+		VALUES ('task-recover-1', 'file_consume', 'STARTED', 'Consume Doc', 'invoice.pdf', '{"path": "invoice.pdf"}', 0, 3)
+	`)
+	if err != nil {
+		t.Fatalf("failed inserting test task: %v", err)
+	}
+
+	// 2. Start a new queue and register handler for 'file_consume'
+	q := NewQueue(db, 2)
+	defer q.Close()
+
+	var executed sync.WaitGroup
+	executed.Add(1)
+
+	q.RegisterHandler("file_consume", func(ctx context.Context, taskID, payloadJSON string) (int, error) {
+		if taskID != "task-recover-1" {
+			t.Errorf("unexpected task ID: %s", taskID)
+		}
+		executed.Done()
+		return 0, nil
+	})
+
+	recovered := q.RecoverInterruptedTasks()
+	if recovered != 1 {
+		t.Fatalf("expected 1 recovered task, got %d", recovered)
+	}
+
+	// Wait for worker to finish execution
+	executed.Wait()
+	time.Sleep(50 * time.Millisecond)
+
+	var status string
+	if err := db.QueryRow("SELECT status FROM tasks WHERE task_id = 'task-recover-1'").Scan(&status); err != nil {
+		t.Fatalf("failed querying task status: %v", err)
+	}
+	if status != "SUCCESS" {
+		t.Fatalf("expected task status SUCCESS after recovery, got %s", status)
+	}
+}

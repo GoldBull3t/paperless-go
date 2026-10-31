@@ -23,3 +23,4 @@ func TestSetup_TextAndJSON(t *testing.T) {
 	// Verify standard log redirection
 	log.Println("standard library log forwarding verification")
 }
+

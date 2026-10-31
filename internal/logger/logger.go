@@ -53,3 +53,4 @@ func (w *slogWriter) Write(p []byte) (n int, err error) {
 	w.logger.Info(msg)
 	return len(p), nil
 }
+

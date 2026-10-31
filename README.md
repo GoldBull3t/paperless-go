@@ -184,12 +184,31 @@ Mudar do Paperless-ngx original para o **paperless-go** é **100% seguro, sem pe
    document_exporter /caminho/para/export
    ```
 
-2. **No paperless-go**, executa o comando de migração:
+2. **No paperless-go**, valida primeiro a integridade em modo de simulação (*Dry Run*):
+   ```bash
+   ./paperless-go migrate --dry-run /caminho/para/export
+   ```
+
+3. **Executa a migração definitiva**:
    ```bash
    ./paperless-go migrate /caminho/para/export
    ```
 
 ✨ **Pronto!** Todo o teu arquivo documental está imediatamente online, pesquisável e acessível com 99% menos uso de memória.
+
+---
+
+## 🔐 Gestão Segura de Administradores (`createsuperuser`)
+
+Para criar ou redefinir contas de administrador de forma segura pela linha de comandos:
+
+```bash
+# Criação direta ou interativa
+./paperless-go createsuperuser admin minhaSenhaSegura123 admin@local.test
+```
+
+> [!NOTE]
+> No primeiro arranque, caso não sejam fornecidas as variáveis `PAPERLESS_ADMIN_USER` e `PAPERLESS_ADMIN_PASSWORD`, o sistema gera automaticamente uma **palavra-passe criptográfica aleatória de alta entropia** e exibe-a uma única vez no terminal de arranque. Zero credenciais fracas ou universais pré-definidas.
 
 ---
 
@@ -207,6 +226,7 @@ Executa uma auditoria completa ao estado do sistema em menos de 1 segundo:
 1. Go Runtime & OS:               [✓] go1.24.0 (linux/amd64, 8 CPUs)
 2. Storage Directories:           [✓] All 5 media & consume folders writable
 3. Database Engine & WAL:         [✓] SQLite WAL mode active (wal)
+   Schema Migrations:             [✓] 3 migration(s) applied (latest: v3 0003_tasks_persistence_and_retries)
 4. Database Integrity:            [✓] PRAGMA integrity_check OK (0 corruption)
 5. Foreign Key Constraints:       [✓] 0 constraint violations detected
 6. Full-Text Search (FTS5):       [✓] FTS5 Virtual Table active (indexed entries)

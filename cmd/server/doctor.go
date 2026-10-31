@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"fmt"
@@ -82,6 +82,15 @@ func RunDoctor(db *database.DB, cfg *config.Config) bool {
 	} else {
 		fmt.Printf("%s[✗] Database query error: %v%s\n", colorRed, err, colorReset)
 		allPassed = false
+	}
+
+	// 3b. Versioned Schema Migrations
+	fmt.Printf("   Schema Migrations:             ")
+	if migs, err := db.GetAppliedMigrations(); err == nil && len(migs) > 0 {
+		latest := migs[len(migs)-1]
+		fmt.Printf("%s[✓] %d migration(s) applied (latest: v%d %s)%s\n", colorGreen, len(migs), latest.Version, latest.Name, colorReset)
+	} else {
+		fmt.Printf("%s[!] No versioned migrations recorded%s\n", colorYellow, colorReset)
 	}
 
 	// 4. Database Integrity Check

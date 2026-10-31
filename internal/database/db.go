@@ -177,42 +177,131 @@ func addColumnIfNotExists(db *DB, table, column, colDef string) error {
 	return nil
 }
 
-func (db *DB) migrate() error {
-	_, err := db.Exec(SchemaSQL)
+// MigrationRecord represents an applied database schema migration
+type MigrationRecord struct {
+	Version   int
+	Name      string
+	AppliedAt time.Time
+}
+
+// GetAppliedMigrations returns all migration records ordered by version
+func (db *DB) GetAppliedMigrations() ([]MigrationRecord, error) {
+	rows, err := db.Query("SELECT version, name, applied_at FROM schema_migrations ORDER BY version ASC")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	// Safe backward compatibility for pre-existing databases with strict error checking
-	columnsToAdd := []struct {
-		table  string
-		column string
-		def    string
-	}{
-		{"documents", "deleted_at", "DATETIME"},
-		{"documents", "archive_filename", "TEXT"},
-		{"documents", "page_count", "INTEGER DEFAULT 1"},
-		{"documents", "owner_id", "INTEGER"},
-		{"documents", "root_document_id", "INTEGER"},
-		{"users", "totp_secret", "TEXT DEFAULT ''"},
-		{"users", "is_mfa_enabled", "BOOLEAN DEFAULT 0"},
-		{"users", "recovery_codes_json", "TEXT DEFAULT '[]'"},
-		{"users", "oidc_sub", "TEXT"},
-		{"documents", "extracted_metadata_json", "TEXT DEFAULT '{}'"},
-		{"documents", "is_vault", "INTEGER DEFAULT 0"},
+	defer rows.Close()
+
+	var records []MigrationRecord
+	for rows.Next() {
+		var rec MigrationRecord
+		if err := rows.Scan(&rec.Version, &rec.Name, &rec.AppliedAt); err != nil {
+			return nil, err
+		}
+		records = append(records, rec)
+	}
+	return records, rows.Err()
+}
+
+func (db *DB) migrate() error {
+	// 1. Ensure version tracking table exists
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version INTEGER PRIMARY KEY,
+			name TEXT NOT NULL,
+			applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed creating schema_migrations table: %w", err)
 	}
 
-	for _, col := range columnsToAdd {
-		if err := addColumnIfNotExists(db, col.table, col.column, col.def); err != nil {
-			return fmt.Errorf("migration error adding %s.%s: %w", col.table, col.column, err)
+	migrations := []struct {
+		version int
+		name    string
+		run     func(db *DB) error
+	}{
+		{
+			version: 1,
+			name:    "0001_initial_schema",
+			run: func(db *DB) error {
+				_, err := db.Exec(SchemaSQL)
+				return err
+			},
+		},
+		{
+			version: 2,
+			name:    "0002_backward_compat_columns",
+			run: func(db *DB) error {
+				columnsToAdd := []struct {
+					table  string
+					column string
+					def    string
+				}{
+					{"documents", "deleted_at", "DATETIME"},
+					{"documents", "archive_filename", "TEXT"},
+					{"documents", "page_count", "INTEGER DEFAULT 1"},
+					{"documents", "owner_id", "INTEGER"},
+					{"documents", "root_document_id", "INTEGER"},
+					{"users", "totp_secret", "TEXT DEFAULT ''"},
+					{"users", "is_mfa_enabled", "BOOLEAN DEFAULT 0"},
+					{"users", "recovery_codes_json", "TEXT DEFAULT '[]'"},
+					{"users", "oidc_sub", "TEXT"},
+					{"documents", "extracted_metadata_json", "TEXT DEFAULT '{}'"},
+					{"documents", "is_vault", "INTEGER DEFAULT 0"},
+				}
+				for _, col := range columnsToAdd {
+					if err := addColumnIfNotExists(db, col.table, col.column, col.def); err != nil {
+						return fmt.Errorf("migration error adding %s.%s: %w", col.table, col.column, err)
+					}
+				}
+				_, err = db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_oidc_sub ON users(oidc_sub) WHERE oidc_sub IS NOT NULL")
+				return err
+			},
+		},
+		{
+			version: 3,
+			name:    "0003_tasks_persistence_and_retries",
+			run: func(db *DB) error {
+				taskColumns := []struct {
+					table  string
+					column string
+					def    string
+				}{
+					{"tasks", "payload_json", "TEXT DEFAULT '{}'"},
+					{"tasks", "attempt_count", "INTEGER DEFAULT 0"},
+					{"tasks", "max_attempts", "INTEGER DEFAULT 3"},
+				}
+				for _, col := range taskColumns {
+					if err := addColumnIfNotExists(db, col.table, col.column, col.def); err != nil {
+						return fmt.Errorf("migration error adding %s.%s: %w", col.table, col.column, err)
+					}
+				}
+				return nil
+			},
+		},
+	}
+
+	for _, m := range migrations {
+		var exists int
+		err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE version = ?", m.version).Scan(&exists)
+		if err != nil {
+			return fmt.Errorf("failed checking migration status for version %d: %w", m.version, err)
+		}
+		if exists > 0 {
+			continue
+		}
+
+		slog.Info("Applying database migration", "version", m.version, "name", m.name)
+		if err := m.run(db); err != nil {
+			return fmt.Errorf("failed running migration %d (%s): %w", m.version, m.name, err)
+		}
+
+		if _, err := db.Exec("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, CURRENT_TIMESTAMP)", m.version, m.name); err != nil {
+			return fmt.Errorf("failed recording migration %d in schema_migrations: %w", m.version, err)
 		}
 	}
 
-	// Ensure unique index for oidc_sub without violating SQLite ALTER TABLE constraints
-	_, err = db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_oidc_sub ON users(oidc_sub) WHERE oidc_sub IS NOT NULL")
-	if err != nil {
-		return fmt.Errorf("failed to create idx_users_oidc_sub: %w", err)
-	}
-
-	log.Println("Database schema migrated successfully (SQLite WAL + FTS5 + AI Embeddings)")
+	log.Println("Database schema migrated successfully (Versioned Migrations + SQLite WAL + FTS5)")
 	return nil
 }

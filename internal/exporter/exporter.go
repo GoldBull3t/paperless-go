@@ -292,17 +292,95 @@ func Export(db *database.DB, cfg *config.Config, targetDir string) error {
 	return nil
 }
 
+// ImportReport contains statistics and validation findings from an import or simulation run
+type ImportReport struct {
+	TotalItems          int
+	TagsCount           int
+	CorrespondentsCount int
+	DocTypesCount       int
+	StoragePathsCount   int
+	CustomFieldsCount   int
+	DocumentsCount      int
+	NotesCount          int
+	MissingFiles        []string
+	ChecksumErrors      []string
+	Warnings            []string
+	DryRun              bool
+}
+
 // Import restores documents and metadata from a backup directory.
 func Import(db *database.DB, cfg *config.Config, sourceDir string) error {
+	_, err := ImportWithDryRun(db, cfg, sourceDir, false)
+	return err
+}
+
+// ImportWithDryRun parses manifest.json, validates file existence, integrity, and relations.
+// When dryRun is true, it performs a complete simulation without mutating database or media files.
+func ImportWithDryRun(db *database.DB, cfg *config.Config, sourceDir string, dryRun bool) (*ImportReport, error) {
 	manifestPath := filepath.Join(sourceDir, "manifest.json")
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
-		return fmt.Errorf("manifest.json not found in %s: %w", sourceDir, err)
+		return nil, fmt.Errorf("manifest.json not found in %s: %w", sourceDir, err)
 	}
 
 	var items []ManifestItem
 	if err := json.Unmarshal(data, &items); err != nil {
-		return fmt.Errorf("failed to parse manifest.json: %w", err)
+		return nil, fmt.Errorf("failed to parse manifest.json: %w", err)
+	}
+
+	report := &ImportReport{
+		TotalItems: len(items),
+		DryRun:     dryRun,
+	}
+
+	// In dry-run mode, validate all items and files without mutating database
+	if dryRun {
+		for _, item := range items {
+			switch item.Model {
+			case "documents.tag":
+				report.TagsCount++
+			case "documents.correspondent":
+				report.CorrespondentsCount++
+			case "documents.documenttype":
+				report.DocTypesCount++
+			case "documents.storagepath":
+				report.StoragePathsCount++
+			case "documents.customfield":
+				report.CustomFieldsCount++
+			case "documents.note":
+				report.NotesCount++
+			case "documents.document":
+				report.DocumentsCount++
+				origName, _ := item.Fields["original_filename"].(string)
+				expectedChecksum, _ := item.Fields["checksum"].(string)
+				ext := filepath.Ext(origName)
+
+				srcOrig := filepath.Join(sourceDir, "originals", fmt.Sprintf("%07d%s", item.PK, ext))
+				if _, err := os.Stat(srcOrig); err != nil {
+					altOrig := filepath.Join(sourceDir, fmt.Sprintf("%07d%s", item.PK, ext))
+					if _, err := os.Stat(altOrig); err != nil {
+						report.MissingFiles = append(report.MissingFiles, fmt.Sprintf("Doc #%d (%s): original file missing", item.PK, origName))
+					} else {
+						srcOrig = altOrig
+					}
+				}
+
+				if _, err := os.Stat(srcOrig); err == nil && expectedChecksum != "" {
+					actualSum, err := calculateChecksum(srcOrig)
+					if err != nil {
+						report.ChecksumErrors = append(report.ChecksumErrors, fmt.Sprintf("Doc #%d (%s): failed reading file for checksum: %v", item.PK, origName, err))
+					} else if actualSum != expectedChecksum {
+						report.ChecksumErrors = append(report.ChecksumErrors, fmt.Sprintf("Doc #%d (%s): checksum mismatch (expected %s, got %s)", item.PK, origName, expectedChecksum, actualSum))
+					}
+				}
+
+				var existingID int
+				if err := db.QueryRow("SELECT id FROM documents WHERE checksum = ? OR id = ?", expectedChecksum, item.PK).Scan(&existingID); err == nil {
+					report.Warnings = append(report.Warnings, fmt.Sprintf("Doc #%d (%s): matches existing document #%d in database", item.PK, origName, existingID))
+				}
+			}
+		}
+		return report, nil
 	}
 
 	for _, item := range items {
@@ -570,7 +648,7 @@ func Import(db *database.DB, cfg *config.Config, sourceDir string) error {
 		}
 	}
 
-	return nil
+	return report, nil
 }
 
 // SanityCheck inspects database consistency, file integrity, checksums, and returns warning messages.

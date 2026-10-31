@@ -1,4 +1,4 @@
-﻿package auth
+package auth
 
 import (
 	"crypto/rand"
@@ -32,47 +32,108 @@ func (s *Service) CheckPassword(hash, password string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
 }
 
-func (s *Service) EnsureDefaultAdmin(defaultUser, defaultPass string) error {
+// GenerateRandomPassword generates a cryptographically secure random alphanumeric password of length n
+func GenerateRandomPassword(n int) string {
+	const charset = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*"
+	bytes := make([]byte, n)
+	if _, err := rand.Read(bytes); err != nil {
+		return GenerateToken(n)
+	}
+	for i, b := range bytes {
+		bytes[i] = charset[int(b)%len(charset)]
+	}
+	return string(bytes)
+}
+
+// EnsureAdminUser verifies if any user exists.
+// If none exist:
+// - Uses adminUser or defaults to "admin".
+// - Uses adminPass if provided. If empty, generates a cryptographically secure random password.
+// Returns created=true and the generated password if one was generated.
+func (s *Service) EnsureAdminUser(adminUser, adminPass, adminEmail string) (bool, string, error) {
 	var count int
 	err := s.db.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
 	if err != nil {
+		return false, "", err
+	}
+
+	if count > 0 {
+		return false, "", nil
+	}
+
+	if adminUser == "" {
+		adminUser = "admin"
+	}
+	if adminEmail == "" {
+		adminEmail = "admin@paperless.local"
+	}
+
+	generatedPassword := ""
+	if adminPass == "" {
+		generatedPassword = GenerateRandomPassword(16)
+		adminPass = generatedPassword
+	}
+
+	hash, err := s.HashPassword(adminPass)
+	if err != nil {
+		return false, "", fmt.Errorf("failed to hash admin password: %w", err)
+	}
+	token := GenerateToken(40)
+
+	_, err = s.db.Exec(`
+		INSERT INTO users (username, password_hash, email, first_name, last_name, is_superuser, is_staff, is_active, auth_token)
+		VALUES (?, ?, ?, 'Admin', 'User', 1, 1, 1, ?)
+	`, adminUser, hash, adminEmail, token)
+	if err != nil {
+		return false, "", fmt.Errorf("failed to create admin user: %w", err)
+	}
+
+	// Create default ui_settings
+	_, _ = s.db.Exec(`
+		INSERT INTO ui_settings (user_id, settings_json)
+		VALUES (1, '{"documentListSize": 25, "theme": "auto"}')
+	`)
+
+	// Create default "Inbox" tag
+	_, _ = s.db.Exec(`
+		INSERT INTO tags (name, slug, color, text_color, is_inbox_tag, matching_algorithm)
+		VALUES ('Inbox', 'inbox', '#cbe5ff', '#000000', 1, 0)
+	`)
+
+	// Create default "Inbox" saved view
+	_, _ = s.db.Exec(`
+		INSERT INTO saved_views (name, show_on_dashboard, show_in_sidebar, sort_field, sort_reverse, filter_rules, owner_id)
+		VALUES ('Inbox', 1, 1, 'added', 1, '[{"rule_type": 7, "value": "1"}]', 1)
+	`)
+
+	return true, generatedPassword, nil
+}
+
+// CreateSuperuser creates a new administrator account directly (used by CLI subcommand createsuperuser)
+func (s *Service) CreateSuperuser(username, password, email string) error {
+	if strings.TrimSpace(username) == "" || strings.TrimSpace(password) == "" {
+		return fmt.Errorf("username and password cannot be empty")
+	}
+	if email == "" {
+		email = username + "@paperless.local"
+	}
+	hash, err := s.HashPassword(password)
+	if err != nil {
 		return err
 	}
+	token := GenerateToken(40)
 
-	if count == 0 {
-		hash, err := s.HashPassword(defaultPass)
-		if err != nil {
-			return err
-		}
-		token := GenerateToken(40)
+	_, err = s.db.Exec(`
+		INSERT INTO users (username, password_hash, email, first_name, last_name, is_superuser, is_staff, is_active, auth_token)
+		VALUES (?, ?, ?, 'Super', 'User', 1, 1, 1, ?)
+		ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash, is_superuser = 1, is_staff = 1, is_active = 1
+	`, username, hash, email, token)
+	return err
+}
 
-		_, err = s.db.Exec(`
-			INSERT INTO users (username, password_hash, email, first_name, last_name, is_superuser, is_staff, is_active, auth_token)
-			VALUES (?, ?, 'admin@paperless.local', 'Admin', 'User', 1, 1, 1, ?)
-		`, defaultUser, hash, token)
-		if err != nil {
-			return fmt.Errorf("failed to create default admin: %w", err)
-		}
-
-		// Also create default ui_settings
-		_, _ = s.db.Exec(`
-			INSERT INTO ui_settings (user_id, settings_json)
-			VALUES (1, '{"documentListSize": 25, "theme": "auto"}')
-		`)
-
-		// Also create default "Inbox" tag
-		_, _ = s.db.Exec(`
-			INSERT INTO tags (name, slug, color, text_color, is_inbox_tag, matching_algorithm)
-			VALUES ('Inbox', 'inbox', '#cbe5ff', '#000000', 1, 0)
-		`)
-
-		// Create default "Inbox" saved view
-		_, _ = s.db.Exec(`
-			INSERT INTO saved_views (name, show_on_dashboard, show_in_sidebar, sort_field, sort_reverse, filter_rules, owner_id)
-			VALUES ('Inbox', 1, 1, 'added', 1, '[{"rule_type": 7, "value": "1"}]', 1)
-		`)
-	}
-	return nil
+func (s *Service) EnsureDefaultAdmin(defaultUser, defaultPass string) error {
+	_, _, err := s.EnsureAdminUser(defaultUser, defaultPass, "admin@paperless.local")
+	return err
 }
 
 func (s *Service) AuthenticateRequest(r *http.Request) (*models.User, error) {

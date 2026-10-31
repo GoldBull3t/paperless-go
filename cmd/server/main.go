@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -54,20 +55,73 @@ func main() {
 			}
 			return
 
-		case "migrate-ngx", "migrate":
-			sourceDir := "./export"
+		case "createsuperuser":
+			authSvc := auth.NewService(db, cfg)
+			user := "admin"
+			pass := ""
+			email := "admin@paperless.local"
 			if len(os.Args) > 2 {
-				sourceDir = os.Args[2]
+				user = os.Args[2]
 			}
-			log.Printf("🚀 Starting 1-Click Migration from Paperless-ngx (%s)...", sourceDir)
-			if err := exporter.Import(db, cfg, sourceDir); err != nil {
+			if len(os.Args) > 3 {
+				pass = os.Args[3]
+			}
+			if len(os.Args) > 4 {
+				email = os.Args[4]
+			}
+			if pass == "" {
+				pass = auth.GenerateRandomPassword(16)
+			}
+			if err := authSvc.CreateSuperuser(user, pass, email); err != nil {
+				log.Fatalf("Failed creating superuser: %v", err)
+			}
+			fmt.Printf("✨ Superuser created successfully! Username: %s | Password: %s | Email: %s\n", user, pass, email)
+			return
+
+		case "migrate-ngx", "migrate":
+			dryRun := false
+			sourceDir := "./export"
+			for _, arg := range os.Args[2:] {
+				if arg == "--dry-run" || arg == "-n" {
+					dryRun = true
+				} else if !strings.HasPrefix(arg, "-") {
+					sourceDir = arg
+				}
+			}
+			if dryRun {
+				log.Printf("🔍 Running SIMULATION (--dry-run) of Paperless-ngx migration from %s (NO files or DB records will be changed)...", sourceDir)
+			} else {
+				log.Printf("🚀 Starting 1-Click Migration from Paperless-ngx (%s)...", sourceDir)
+			}
+			report, err := exporter.ImportWithDryRun(db, cfg, sourceDir, dryRun)
+			if err != nil {
 				log.Fatalf("Migration failed: %v", err)
 			}
-			var count int
-			if err := db.QueryRow("SELECT COUNT(*) FROM documents").Scan(&count); err != nil {
-				log.Printf("[WARN] Failed counting imported documents: %v", err)
+			fmt.Println("--------------------------------------------------")
+			fmt.Printf("📦 Total Manifest Items:    %d\n", report.TotalItems)
+			fmt.Printf("📄 Documents Detected:      %d\n", report.DocumentsCount)
+			fmt.Printf("🏷️  Tags Detected:           %d\n", report.TagsCount)
+			fmt.Printf("🏢 Correspondents Detected: %d\n", report.CorrespondentsCount)
+			fmt.Printf("📁 Document Types Detected: %d\n", report.DocTypesCount)
+			fmt.Printf("💾 Storage Paths Detected:  %d\n", report.StoragePathsCount)
+			if len(report.MissingFiles) > 0 {
+				fmt.Printf("⚠️  Missing Files (%d):\n", len(report.MissingFiles))
+				for _, mf := range report.MissingFiles {
+					fmt.Printf("   - %s\n", mf)
+				}
 			}
-			log.Printf("✨ Migration completed successfully! %d document(s) imported and indexed in FTS5.", count)
+			if len(report.ChecksumErrors) > 0 {
+				fmt.Printf("❌ Checksum Errors (%d):\n", len(report.ChecksumErrors))
+				for _, ce := range report.ChecksumErrors {
+					fmt.Printf("   - %s\n", ce)
+				}
+			}
+			fmt.Println("--------------------------------------------------")
+			if dryRun {
+				fmt.Println("✨ Dry-run simulation finished! Zero changes were made to your database.")
+			} else {
+				fmt.Println("✨ Migration completed successfully! All documents and tags are now active.")
+			}
 			return
 
 		case "export":
@@ -121,11 +175,24 @@ func main() {
 		}
 	}
 
-	// 3. Initialize Auth Service & default admin
+	// 3. Initialize Auth Service & admin account
 	authSvc := auth.NewService(db, cfg)
-	if err := authSvc.EnsureDefaultAdmin("admin", "admin"); err != nil {
-		slog.Error("Failed to initialize default admin", "error", err)
+	adminUser := cfg.AdminUser
+	if adminUser == "" {
+		adminUser = "admin"
+	}
+	created, genPass, err := authSvc.EnsureAdminUser(adminUser, cfg.AdminPassword, cfg.AdminEmail)
+	if err != nil {
+		slog.Error("Failed to initialize admin account", "error", err)
 		os.Exit(1)
+	}
+	if created && genPass != "" {
+		fmt.Println("=======================================================================")
+		fmt.Println("🔐 SECURITY NOTICE: Generated initial administrator credentials:")
+		fmt.Printf("   Username: %s\n", adminUser)
+		fmt.Printf("   Password: %s\n", genPass)
+		fmt.Println("   Please store this password securely or set PAPERLESS_ADMIN_PASSWORD.")
+		fmt.Println("=======================================================================")
 	}
 
 	// 4. Start Continuous SQLite WAL & Query Planner Maintenance
@@ -134,6 +201,12 @@ func main() {
 	// 5. Initialize In-Memory Queue & WebSocket Hub
 	taskQueue := queue.NewQueue(db, cfg.OCRWorkerCount)
 	defer taskQueue.Close()
+
+	// Recover any pending or interrupted tasks from database
+	recoveredTasks := taskQueue.RecoverInterruptedTasks()
+	if recoveredTasks > 0 {
+		slog.Info("Recovered interrupted tasks from previous run", "count", recoveredTasks)
+	}
 
 	wsHub := api.NewWebSocketHub()
 	defer wsHub.Close()
