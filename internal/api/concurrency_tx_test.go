@@ -128,7 +128,7 @@ func TestTransaction_AtomicRollbackOnFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed inserting initial document: %v", err)
 	}
-	_, err = db.Exec("INSERT INTO documents_fts (rowid, title, content) VALUES (999, 'Original Title', 'Original Content')")
+	_, err = db.Exec("INSERT OR REPLACE INTO documents_fts (rowid, title, content) VALUES (999, 'Original Title', 'Original Content')")
 	if err != nil {
 		t.Fatalf("failed inserting initial fts: %v", err)
 	}

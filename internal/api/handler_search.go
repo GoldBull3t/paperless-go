@@ -98,13 +98,14 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 			if user != nil && !user.IsSuperuser {
 				docArgs = append(docArgs, user.ID)
 			}
+			docArgs = append(docArgs, safeFTS)
 			docRows, err = h.db.Query(fmt.Sprintf(`
 				SELECT d.id, d.title, d.content, d.correspondent_id, d.document_type_id, d.storage_path_id,
 				       d.created, d.modified, d.added, d.archive_serial_number, d.original_filename, d.archive_filename,
 				       d.mime_type, d.owner_id, d.page_count
 				FROM documents d
 				WHERE d.deleted_at IS NULL AND (d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?) OR d.title LIKE ?%s)%s
-				ORDER BY d.created DESC LIMIT 10
+				ORDER BY (SELECT bm25(documents_fts, 5.0, 1.0) FROM documents_fts WHERE documents_fts.rowid = d.id AND documents_fts MATCH ?) ASC, d.created DESC LIMIT 10
 			`, semanticClause, docOwnerFilter), docArgs...)
 		} else {
 			docArgs = append(docArgs, likeQuery, likeQuery)

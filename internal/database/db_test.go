@@ -136,8 +136,8 @@ func TestVersionedMigrations(t *testing.T) {
 		t.Fatalf("GetAppliedMigrations failed: %v", err)
 	}
 
-	if len(records) < 3 {
-		t.Fatalf("expected at least 3 applied migrations, got %d", len(records))
+	if len(records) < 4 {
+		t.Fatalf("expected at least 4 applied migrations, got %d", len(records))
 	}
 
 	if records[0].Version != 1 || records[0].Name != "0001_initial_schema" {
@@ -148,6 +148,63 @@ func TestVersionedMigrations(t *testing.T) {
 	}
 	if records[2].Version != 3 || records[2].Name != "0003_tasks_persistence_and_retries" {
 		t.Errorf("unexpected migration 3: %+v", records[2])
+	}
+	if records[3].Version != 4 || records[3].Name != "0004_search_indexes_and_fts_sync" {
+		t.Errorf("unexpected migration 4: %+v", records[3])
+	}
+}
+
+func TestFTS5_AutomaticTriggersSync(t *testing.T) {
+	db, tmpDir := setupTestDB(t)
+	defer os.RemoveAll(tmpDir)
+	defer db.Close()
+
+	// 1. Insert document into 'documents'
+	res, err := db.Exec(`
+		INSERT INTO documents (title, content, original_filename, checksum, mime_type)
+		VALUES ('Fatura Eletricidade', 'Consumo mensal de 150 kWh no valor de 45 EUR', 'fatura.pdf', 'chk123', 'application/pdf')
+	`)
+	if err != nil {
+		t.Fatalf("failed inserting test document: %v", err)
+	}
+	docID, _ := res.LastInsertId()
+
+	// Verify trigger automatically inserted into documents_fts
+	var ftsTitle, ftsContent string
+	err = db.QueryRow("SELECT title, content FROM documents_fts WHERE rowid = ?", docID).Scan(&ftsTitle, &ftsContent)
+	if err != nil {
+		t.Fatalf("trigger documents_ai failed to populate documents_fts: %v", err)
+	}
+	if ftsTitle != "Fatura Eletricidade" {
+		t.Errorf("expected fts title 'Fatura Eletricidade', got %q", ftsTitle)
+	}
+
+	// 2. Update document title and content
+	_, err = db.Exec("UPDATE documents SET title = 'Fatura EDP 2026', content = 'Novo valor 50 EUR' WHERE id = ?", docID)
+	if err != nil {
+		t.Fatalf("failed updating document: %v", err)
+	}
+
+	// Verify trigger documents_au updated documents_fts
+	err = db.QueryRow("SELECT title, content FROM documents_fts WHERE rowid = ?", docID).Scan(&ftsTitle, &ftsContent)
+	if err != nil {
+		t.Fatalf("failed querying documents_fts after update: %v", err)
+	}
+	if ftsTitle != "Fatura EDP 2026" || ftsContent != "Novo valor 50 EUR" {
+		t.Errorf("expected updated fts values, got title=%q, content=%q", ftsTitle, ftsContent)
+	}
+
+	// 3. Delete document
+	_, err = db.Exec("DELETE FROM documents WHERE id = ?", docID)
+	if err != nil {
+		t.Fatalf("failed deleting document: %v", err)
+	}
+
+	// Verify trigger documents_ad removed from documents_fts
+	var dummy int
+	err = db.QueryRow("SELECT rowid FROM documents_fts WHERE rowid = ?", docID).Scan(&dummy)
+	if err == nil {
+		t.Errorf("expected row to be deleted from documents_fts, but it still exists")
 	}
 }
 

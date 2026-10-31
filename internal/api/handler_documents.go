@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/go-chi/chi/v5"
 	"paperless-go/internal/ai"
@@ -25,6 +24,7 @@ import (
 	"paperless-go/internal/database"
 	"paperless-go/internal/models"
 	"paperless-go/internal/queue"
+	"paperless-go/internal/search"
 	"paperless-go/internal/vault"
 	"paperless-go/internal/workflow"
 )
@@ -47,23 +47,7 @@ func NewDocumentsHandler(db *database.DB, cfg *config.Config, c *consumer.Consum
 }
 
 func sanitizeFTSQuery(q string) string {
-	var cleaned strings.Builder
-	for _, r := range q {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsSpace(r) {
-			cleaned.WriteRune(r)
-		} else {
-			cleaned.WriteRune(' ')
-		}
-	}
-	words := strings.Fields(cleaned.String())
-	if len(words) == 0 {
-		return ""
-	}
-	var terms []string
-	for _, w := range words {
-		terms = append(terms, w+"*")
-	}
-	return strings.Join(terms, " ")
+	return search.SanitizeFTS5Query(q)
 }
 
 func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -108,9 +92,10 @@ func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Full text search with query sanitization
+	var safeFTS string
 	searchQuery := q.Get("query")
 	if searchQuery != "" {
-		safeFTS := sanitizeFTSQuery(searchQuery)
+		safeFTS = sanitizeFTSQuery(searchQuery)
 		if safeFTS != "" {
 			conditions = append(conditions, "d.id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?)")
 			args = append(args, safeFTS)
@@ -367,6 +352,7 @@ func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
 	// Ordering
 	ordering := q.Get("ordering")
 	orderClause := "ORDER BY d.created DESC"
+	var orderArgs []interface{}
 	switch ordering {
 	case "created":
 		orderClause = "ORDER BY d.created ASC"
@@ -384,6 +370,16 @@ func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
 		orderClause = "ORDER BY d.archive_serial_number ASC"
 	case "-archive_serial_number":
 		orderClause = "ORDER BY d.archive_serial_number DESC"
+	case "score", "-score":
+		if safeFTS != "" {
+			orderClause = "ORDER BY (SELECT bm25(documents_fts, 5.0, 1.0) FROM documents_fts WHERE documents_fts.rowid = d.id AND documents_fts MATCH ?) ASC, d.created DESC"
+			orderArgs = append(orderArgs, safeFTS)
+		}
+	default:
+		if safeFTS != "" && ordering == "" {
+			orderClause = "ORDER BY (SELECT bm25(documents_fts, 5.0, 1.0) FROM documents_fts WHERE documents_fts.rowid = d.id AND documents_fts MATCH ?) ASC, d.created DESC"
+			orderArgs = append(orderArgs, safeFTS)
+		}
 	}
 
 	whereClause := ""
@@ -392,8 +388,9 @@ func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Count total & fetch all matching IDs
+	allIDsArgs := append(args, orderArgs...)
 	allIDsQuery := fmt.Sprintf("SELECT d.id FROM documents d %s %s", whereClause, orderClause)
-	rowsAll, err := h.db.Query(allIDsQuery, args...)
+	rowsAll, err := h.db.Query(allIDsQuery, allIDsArgs...)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -417,14 +414,14 @@ func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
 	totalCount := len(allIDs)
 
 	// Fetch paginated results
+	pageArgs := append(args, orderArgs...)
+	pageArgs = append(pageArgs, pageSize, offset)
 	pageQuery := fmt.Sprintf(`
 		SELECT d.id, d.title, d.content, d.correspondent_id, d.document_type_id, d.storage_path_id,
 		       d.created, d.modified, d.added, d.archive_serial_number, d.original_filename, d.archive_filename,
 		       d.mime_type, d.owner_id, d.page_count, d.is_vault
 		FROM documents d %s %s LIMIT ? OFFSET ?
 	`, whereClause, orderClause)
-
-	pageArgs := append(args, pageSize, offset)
 	rows, err := h.db.Query(pageQuery, pageArgs...)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

@@ -280,6 +280,33 @@ func (db *DB) migrate() error {
 				return nil
 			},
 		},
+		{
+			version: 4,
+			name:    "0004_search_indexes_and_fts_sync",
+			run: func(db *DB) error {
+				statements := []string{
+					"CREATE INDEX IF NOT EXISTS idx_documents_checksum ON documents(checksum)",
+					"CREATE INDEX IF NOT EXISTS idx_documents_storage_path ON documents(storage_path_id)",
+					"CREATE INDEX IF NOT EXISTS idx_documents_owner ON documents(owner_id)",
+					"CREATE INDEX IF NOT EXISTS idx_documents_vault ON documents(is_vault)",
+					"CREATE INDEX IF NOT EXISTS idx_document_tags_tag_doc ON document_tags(tag_id, document_id)",
+					"CREATE INDEX IF NOT EXISTS idx_document_custom_fields_field ON document_custom_fields(field_id, document_id)",
+					"CREATE INDEX IF NOT EXISTS idx_document_notes_doc ON document_notes(document_id)",
+					`CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
+						INSERT OR REPLACE INTO documents_fts (rowid, title, content) VALUES (new.id, new.title, new.content);
+					END`,
+					`CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE OF title, content ON documents BEGIN
+						UPDATE documents_fts SET title = new.title, content = new.content WHERE rowid = new.id;
+					END`,
+				}
+				for _, stmt := range statements {
+					if _, err := db.Exec(stmt); err != nil {
+						return fmt.Errorf("migration 4 statement failed (%s): %w", stmt, err)
+					}
+				}
+				return nil
+			},
+		},
 	}
 
 	for _, m := range migrations {

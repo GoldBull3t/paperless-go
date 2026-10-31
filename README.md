@@ -83,10 +83,13 @@ paperless-go:
 
 Além de ser incomparavelmente mais rápido e leve, o **paperless-go** traz inovações de engenharia e funcionalidades exclusivas que não existem no projeto oficial:
 
-### 1. Resiliência de Concorrência & Manutenção Automática do SQLite
+### 1. Resiliência de Concorrência, Base de Dados & Pesquisa FTS5
 - **Autocheckpoint WAL & Otimizador de Índices:** Tarefa em segundo plano periódica que executa `PRAGMA wal_checkpoint(PASSIVE)` e `PRAGMA optimize`, mantendo o ficheiro WAL enxuto e as estatísticas do planejador de consultas sempre afiadas sem paragens.
 - **Retry com Backoff Exponencial em `WithTx`:** Elimina erros de bloqueio transitórios (`database is locked` / `sqlite_busy`) sob escrita massiva simultânea através de retentativas automáticas e transações atómicas ACID.
 - **Gravações Atómicas com `fsync`:** Prevenção total contra ficheiros a meio de gravação causados por falhas de energia ou encerramento inesperado.
+- **Sincronização Nativa FTS5 via Triggers SQLite:** Triggers `AFTER INSERT`, `AFTER UPDATE OF title, content` e `AFTER DELETE` mantêm a tabela de pesquisa `documents_fts` sincronizada em tempo real ao nível do storage engine, eliminando necessidade de reindexações manuais.
+- **Ranking de Relevância BM25 & Sanitização Robusta:** Pesquisa textual com pontuação BM25 (títulos têm peso 5x superior ao corpo), preservação de expressões exatas entre aspas (`"termo exato"`), expansão de prefixos (`word*`) e sanitização contra quebras de sintaxe SQL.
+- **Índices de Cobertura para Filtros Combinados:** Índices B-Tree dedicados em `checksum`, `storage_path_id`, `owner_id`, `document_tags(tag_id, document_id)`, `document_custom_fields` e `document_notes` para consultas compostas instantâneas.
 
 ### 2. Observabilidade Moderna com `log/slog` & Prometheus
 - **Structured Logging Nativo:** Logs estruturados de alta performance em formato JSON (`PAPERLESS_LOG_FORMAT=json`) ou texto legível colorido (`text`), com níveis configuráveis (`DEBUG`, `INFO`, `WARN`, `ERROR`).
