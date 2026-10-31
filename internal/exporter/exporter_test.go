@@ -126,3 +126,4 @@ func TestImportWithDryRun(t *testing.T) {
 		t.Fatalf("expected 1 tag 'Finance' in DB, got %d", tagCount)
 	}
 }
+

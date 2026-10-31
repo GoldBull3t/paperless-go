@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"log/slog"
@@ -198,9 +199,29 @@ func main() {
 	// 4. Start Continuous SQLite WAL & Query Planner Maintenance
 	db.StartMaintenance(rootCtx, 1*time.Hour)
 
-	// 5. Initialize In-Memory Queue & WebSocket Hub
+	// 5. Initialize In-Memory Queue & Document Consumer
 	taskQueue := queue.NewQueue(db, cfg.OCRWorkerCount)
 	defer taskQueue.Close()
+
+	docConsumer := consumer.NewConsumer(db, cfg)
+
+	// Register persistent task handlers
+	consumeHandler := func(ctx context.Context, taskID string, payloadJSON string) (int, error) {
+		var p struct {
+			FilePath   string `json:"file_path"`
+			FileName   string `json:"file_name"`
+			ConsumeDir string `json:"consume_dir"`
+		}
+		if err := json.Unmarshal([]byte(payloadJSON), &p); err != nil {
+			return 0, fmt.Errorf("failed unmarshaling consume payload: %w", err)
+		}
+		if p.FilePath != "" {
+			defer os.Remove(p.FilePath)
+		}
+		return docConsumer.ConsumeFileWithFallback(p.FilePath, p.FileName, p.ConsumeDir)
+	}
+	taskQueue.RegisterHandler("consume_document", consumeHandler)
+	taskQueue.RegisterHandler("file_handling", consumeHandler)
 
 	// Recover any pending or interrupted tasks from database
 	recoveredTasks := taskQueue.RecoverInterruptedTasks()
@@ -212,8 +233,7 @@ func main() {
 	defer wsHub.Close()
 	taskQueue.SetBroadcaster(wsHub)
 
-	// 6. Initialize Document Consumer & Watcher
-	docConsumer := consumer.NewConsumer(db, cfg)
+	// 6. Initialize Watcher
 	watcher := consumer.NewWatcher(cfg.ConsumeDir, docConsumer, taskQueue)
 	watcher.Start()
 	defer watcher.Stop()

@@ -3,6 +3,7 @@ package consumer
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -580,4 +581,27 @@ func CalculateChecksum(path string) (string, error) {
 
 func copyFile(src, dst string) error {
 	return crypto.AtomicCopy(src, dst)
+}
+
+// ConsumeFileWithFallback consumes a file and handles duplicate / failure preservation in consume directory
+func (c *Consumer) ConsumeFileWithFallback(filePath, fileName, consumeDir string) (int, error) {
+	docID, err := c.ConsumeFile(filePath, fileName, nil)
+	if err != nil {
+		var dupErr *ErrDuplicateDocument
+		if errors.As(err, &dupErr) {
+			if consumeDir != "" && os.Getenv("PAPERLESS_CONSUMER_DELETE_DUPLICATES") != "true" {
+				dupDir := filepath.Join(consumeDir, ".duplicates")
+				_ = os.MkdirAll(dupDir, 0755)
+				_ = copyFile(filePath, filepath.Join(dupDir, fileName))
+			}
+			return docID, err
+		}
+		if consumeDir != "" {
+			failedDir := filepath.Join(consumeDir, ".failed")
+			_ = os.MkdirAll(failedDir, 0755)
+			_ = copyFile(filePath, filepath.Join(failedDir, fileName))
+		}
+		return 0, err
+	}
+	return docID, nil
 }

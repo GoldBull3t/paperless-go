@@ -1,7 +1,6 @@
 package consumer
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -114,29 +113,19 @@ func (w *Watcher) scanConsumeDir() {
 		}
 		log.Printf("[Watcher] Queued drop-in document: %s", fileName)
 
-		w.queue.Enqueue("Consume document", fileName, tmpPath, func(tid string) (int, error) {
-			defer os.Remove(tmpPath)
-			docID, err := w.consumer.ConsumeFile(tmpPath, fileName, nil)
-			if err != nil {
-				var dupErr *ErrDuplicateDocument
-				if errors.As(err, &dupErr) {
-					// Duplicate detected: move to .duplicates/ or remove if configured
-					if os.Getenv("PAPERLESS_CONSUMER_DELETE_DUPLICATES") != "true" {
-						dupDir := filepath.Join(w.consumeDir, ".duplicates")
-						_ = os.MkdirAll(dupDir, 0755)
-						_ = copyFile(tmpPath, filepath.Join(dupDir, fileName))
-					}
-					return docID, err
-				}
-
-				// If other failure, preserve failed file in consume/.failed/ so user doesn't lose original
-				failedDir := filepath.Join(w.consumeDir, ".failed")
-				_ = os.MkdirAll(failedDir, 0755)
-				_ = copyFile(tmpPath, filepath.Join(failedDir, fileName))
-				return 0, err
-			}
-			return docID, nil
-		})
+		payload := map[string]string{
+			"file_path":   tmpPath,
+			"file_name":   fileName,
+			"consume_dir": w.consumeDir,
+		}
+		if _, err := w.queue.EnqueuePersistent("consume_document", "Consume document", fileName, tmpPath, payload); err != nil {
+			log.Printf("[WARN] Watcher failed enqueuing persistent consume task for %s: %v", fileName, err)
+			// Fallback to in-memory execution if persistent enqueue failed
+			w.queue.Enqueue("Consume document", fileName, tmpPath, func(tid string) (int, error) {
+				defer os.Remove(tmpPath)
+				return w.consumer.ConsumeFileWithFallback(tmpPath, fileName, w.consumeDir)
+			})
+		}
 	}
 }
 

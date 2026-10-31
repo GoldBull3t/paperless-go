@@ -100,3 +100,4 @@ func TestCreateSuperuser(t *testing.T) {
 		t.Fatalf("expected 1 superuser 'cli_user', got %d (err: %v)", count, err)
 	}
 }
+
