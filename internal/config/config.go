@@ -1,4 +1,4 @@
-﻿package config
+package config
 
 import (
 	"os"
@@ -22,6 +22,8 @@ type Config struct {
 	DefaultLanguage  string
 	AutoLogin        bool
 	CorsAllowedHosts string
+	LogLevel         string // "debug", "info", "warn", "error"
+	LogFormat        string // "text", "json"
 
 	// AI Configuration (1. A, 1. B, 1. C)
 	AIEnabled          bool
@@ -80,6 +82,8 @@ func Load() *Config {
 	defaultLang := getEnv("PAPERLESS_DEFAULT_LANGUAGE", "en-US")
 	autoLogin := getEnv("PAPERLESS_AUTO_LOGIN", "false") == "true"
 	corsAllowed := getEnv("PAPERLESS_CORS_ALLOWED_HOSTS", "")
+	logLevel := getEnv("PAPERLESS_LOG_LEVEL", "info")
+	logFormat := getEnv("PAPERLESS_LOG_FORMAT", "text")
 
 	// AI Defaults & envs
 	aiProvider := strings.ToLower(getEnv("PAPERLESS_AI_PROVIDER", "ollama"))
@@ -124,6 +128,8 @@ func Load() *Config {
 		DefaultLanguage:    defaultLang,
 		AutoLogin:          autoLogin,
 		CorsAllowedHosts:   corsAllowed,
+		LogLevel:           logLevel,
+		LogFormat:          logFormat,
 		EncryptionAtRest:   encAtRest,
 		EncryptionKey:      encKey,
 		AIEnabled:          aiEnabled,

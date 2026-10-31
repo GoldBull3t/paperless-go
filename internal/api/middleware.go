@@ -1,4 +1,4 @@
-﻿package api
+package api
 
 import (
 	"context"
@@ -22,6 +22,9 @@ func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("Permissions-Policy", "geolocation=(), camera=(), microphone=()")
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin-allow-popups")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; object-src 'self' blob:; frame-ancestors 'self';")
 
 		next.ServeHTTP(w, r)
 	})

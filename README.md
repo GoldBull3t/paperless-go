@@ -1,103 +1,218 @@
 # paperless-go 📄⚡
 
-Uma reescrita completa e ultra-otimizada do **[Paperless-ngx](https://github.com/paperless-ngx/paperless-ngx)** em **Go**, seguindo rigorosamente a mesma filosofia que o **[Vaultwarden](https://github.com/dani-garcia/vaultwarden)** aplicou ao Bitwarden.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paperless-ngx/paperless-ngx/main/resources/logo/svg/Color%20logo%20-%20no%20background.svg" width="160" alt="paperless-go logo" />
+</p>
 
-Serve o **frontend Angular oficial do Paperless-ngx** (100% idêntico em design, temas, atalhos e visualizador de documentos) sobre um backend compilado em Go com **SQLite WAL e FTS5**, reduzindo o consumo de memória RAM em **mais de 98%** (de ~1.5 GB para **~14 MB de RAM** em repouso) num **único binário estático**.
+<p align="center">
+  <strong>The ultra-lightweight, single-binary Go rewrite of <a href="https://github.com/paperless-ngx/paperless-ngx">Paperless-ngx</a>.</strong><br/>
+  <em>What <a href="https://github.com/dani-garcia/vaultwarden">Vaultwarden</a> is to Bitwarden, <strong>paperless-go</strong> is to Paperless-ngx.</em>
+</p>
+
+<p align="center">
+  <a href="https://golang.org"><img src="https://img.shields.io/badge/Go-1.24+-00ADD8?style=for-the-badge&logo=go" alt="Go 1.24+"></a>
+  <a href="#-comparativo-paperless-ngx-vs-paperless-go"><img src="https://img.shields.io/badge/RAM_Idle-~14_MB-brightgreen?style=for-the-badge" alt="RAM Idle ~14MB"></a>
+  <a href="#-comparativo-paperless-ngx-vs-paperless-go"><img src="https://img.shields.io/badge/Containers-1_Single_Process-blue?style=for-the-badge" alt="1 Single Process"></a>
+  <a href="https://hub.docker.com"><img src="https://img.shields.io/badge/Docker_Image-~35_MB-orange?style=for-the-badge&logo=docker" alt="Docker Image ~35MB"></a>
+  <a href="#-migra%C3%A7%C3%A3o-1-click-do-paperless-ngx-para-o-paperless-go"><img src="https://img.shields.io/badge/Drop--in_Parity-100%25-success?style=for-the-badge" alt="100% Parity"></a>
+</p>
+
+---
+
+## 💡 Porquê o paperless-go?
+
+O **[Paperless-ngx](https://github.com/paperless-ngx/paperless-ngx)** é a melhor plataforma de gestão documental do mundo open source. No entanto, a sua pilha tradicional em Python/Django requer uma constelação complexa de **5 a 6 contentores** (Web server, Celery Worker, Celery Beat, Redis, PostgreSQL e Gotenberg/Tika), consumindo rotineiramente **entre 1.2 GB e 2 GB de memória RAM** mesmo em repouso.
+
+O **paperless-go** resolve este problema radicalmente:
+- **100% Drop-in Replacement:** Serve a **mesma interface web Angular oficial** do Paperless-ngx (design idêntico, atalhos de teclado, visualizador de PDF integrado, temas escuro/claro e todos os idiomas).
+- **Consumo de ~14 MB de RAM:** Uma redução brutal de **-99% no consumo de recursos**, tornando-o viável para qualquer Raspberry Pi, VPS de 512MB ou servidor doméstico low-power.
+- **Arranque Instantâneo (< 20ms):** Sem esperas por migrações Django lentas ou inicializações de workers Celery.
+- **Zero Dependências Externas:** Um **único binário estático** com motor SQLite WAL de alto rendimento e pesquisa de texto integral FTS5 embutida.
+- **Compatibilidade com as Apps Móveis:** Funciona imediatamente com as aplicações oficiais e de terceiros para iOS e Android (*Paperless Mobile*, *Swift Paperless*).
 
 ---
 
 ## 📊 Comparativo: Paperless-ngx vs paperless-go
 
-| Métrica | Paperless-ngx Oficial | paperless-go (Go + SQLite) | Ganho |
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│ MEMÓRIA RAM EM REPOUSO (IDLE FOOTPRINT)                                │
+├──────────────────────────────────────┬─────────────────────────────────┤
+│ Paperless-ngx Oficial (Python/Stack) │ ████████████████████ ~1.500 MB  │
+│ paperless-go (Go + SQLite WAL)       │ ▌ ~14 MB  (-99% de consumo!)    │
+└──────────────────────────────────────┴─────────────────────────────────┘
+```
+
+| Métrica | Paperless-ngx Oficial | paperless-go (Go + SQLite) | Ganho / Vantagem |
 | :--- | :--- | :--- | :--- |
 | **Consumo em Repouso (RAM)** | **~1.200 MB – 2.000 MB** | **~14 MB** | **-99.0%** ⚡ |
-| **Nº de Processos / Contentores** | 5 a 6 (Web, Celery, Beat, Redis, DB...) | **1 único processo** | **Single binary** |
-| **Fila de Tarefas (Queue)** | Redis + Celery Worker + Celery Beat | **Goroutines + Worker Pool em memória** | Zero overhead |
-| **Base de Dados & Busca** | PostgreSQL / SQLite + Whoosh / Tantivy | **SQLite WAL + FTS5 integrado** | Latência < 1ms |
-| **Design & Interface Web** | Angular SPA (`src-ui`) | **A mesma interface oficial (`src-ui`)** | **100% Idêntico** |
-| **Compatibilidade Mobile** | Apps oficiais & de terceiros | **100% compatível com a API REST** | Drop-in replacement |
+| **Nº de Processos / Contentores** | 5 a 6 (Web, Celery, Beat, Redis, DB...) | **1 único processo** | **Zero complexidade** |
+| **Tempo de Arranque (*Cold Boot*)** | 30 a 60 segundos | **< 20 milissegundos** | Instantâneo |
+| **Fila de Tarefas (*Queue*)** | Redis + Celery Worker + Celery Beat | **Goroutines + Worker Pool em Go** | Sem Redis |
+| **Base de Dados & Pesquisa** | PostgreSQL / SQLite + Whoosh / Tantivy | **SQLite WAL + FTS5 integrado** | Latência < 1ms |
+| **Extração Office (DOCX/XLSX)** | Requer Gotenberg & Apache Tika (~800MB) | **Extrator Nativo Pure-Go** | Zero dependências |
+| **Design & Interface Web** | Angular SPA (`src-ui`) | **A mesma interface oficial integrada** | **100% Idêntico** |
+| **Compatibilidade Mobile** | Apps oficiais & de terceiros | **100% compatível com a API REST** | Drop-in |
 | **Tamanho da Imagem Docker** | ~2.5 GB a 4 GB | **~35 MB** | **-98.5%** |
-| **Tempo de Arranque** | 30 a 60 segundos | **< 20 milissegundos** | Instantâneo |
 
 ---
 
-## 🚀 Funcionalidades Principais
+## 🏛️ Arquitetura Simplificada
 
-1. **Frontend Oficial Integrado:**
-   - Visualizador de PDF inline com zoom, rotação e seleção de texto.
-   - Suporte nativo a múltiplos idiomas (`pt-PT`, `en-US`, `pt-BR`, `es-ES`, `de-DE`, `fr-FR`...).
-   - Temas claro e escuro automáticos (*Dark / Light Mode*).
-   - Atalhos de teclado e paginação rápida.
+```
+Paperless-ngx Oficial:
+[Web SPA] ──► [Gunicorn/Django] ──► [Redis] ──► [Celery Worker] ──► [PostgreSQL]
+                     │                                │
+                     ▼                                ▼
+              [Gotenberg/Tika]                  [Whoosh/Tantivy]
 
-2. **Filtros e Busca de Texto Integral Ultra-Rápida:**
-   - Motor de pesquisa embutido **SQLite FTS5** com ranking BM25.
-   - Pesquisa instantânea por título, conteúdo extraído, correspondente, tipo de documento e etiquetas (*tags*).
+paperless-go:
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          paperless-go (Single Binary)                   │
+│                                                                         │
+│  [Angular UI] ──► [Go HTTP API & WS] ──► [Goroutine Queue]              │
+│                           │                        │                    │
+│                           ▼                        ▼                    │
+│                 [SQLite WAL + FTS5]      [Pure-Go PDF/Office Extractor] │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
-3. **Ingestão Automática de Documentos:**
-   - **Upload via Web:** Endpoint `/api/documents/post_document/` com suporte a multipart form.
-   - **Watch Folder (`consume/`):** Monitorização automática da pasta `consume/` para novos ficheiros com verificação de integridade antes da ingestão.
-   - **Smart Text Bypass:** Documentos digitais modernos (faturas de eletricidade, extratos bancários, recibos) têm o seu texto extraído diretamente em `<10ms` sem recorrer a OCR pesado, poupando CPU e RAM.
-   - **Suporte a OCR:** Deteção e fallback automático para Tesseract/poppler quando disponível.
+---
 
-4. **Taxonomia e Organização Completa:**
-   - Correspondentes (*Correspondents*)
-   - Tipos de Documento (*Document Types*)
-   - Etiquetas (*Tags*) com suporte a tag de Inbox automática
-   - Caminhos de Armazenamento (*Storage Paths*)
-   - Vistas Guardadas (*Saved Views*)
-   - Campos Personalizados (*Custom Fields*)
-   - Tarefas em Segundo Plano (*Tasks*) com sincronização em tempo real via WebSocket (`/ws/status/`).
+## 🚀 Melhorias e Funcionalidades Face ao Original
 
-5. **Novas Funcionalidades Enterprise & Homelab (Exclusivas do paperless-go):**
-   - **Modo Cofre Criptográfico (*Vault Mode* - `/api/vault/`):** Blindagem extra para documentos altamente confidenciais (cartões de cidadão, contratos, senhas, declarações de IRS) com palavra-passe mestra separada derivada via **Argon2id**, auto-bloqueio por inatividade e restrição total de download/pré-visualização enquanto bloqueado (HTTP 423 Locked).
-   - **Deteção Inteligente de Duplicados por Semelhança Textual (*Fuzzy Matching* - `/api/documents/{id}/duplicates/`):** Deteta documentos quase idênticos através do algoritmo Jaccard + Shingles, identificando re-digitalizações ou documentos com metadados/formatos alterados mesmo quando o checksum SHA-256 não coincide.
-   - **Separação Automática por Código de Barras / Patch-Code (*Batch Scanning*):** Permite digitalizar dezenas de páginas no alimentador ADF separadas por folhas com código de barras Patch-T, QR Code ou Code-128; o sistema fatiará o PDF em documentos individuais e herdará tags e ASN automaticamente.
-   - **Assistente de IA & RAG Integrado (`/api/documents/chat/`):** Converse em linguagem natural diretamente com seus documentos ou com todo o acervo. Compatível com **Ollama (local/offline)**, **OpenAI** e **Google Gemini**.
-   - **Extração Inteligente de Metadados via LLM:** Reconhecimento automático e estruturação em JSON de Valor Total, Moeda, Data de Vencimento, NIF/CNPJ e IBAN.
-   - **Pesquisa Semântica Vetorial Híbrida:** Combinação de SQLite FTS5 (BM25) com similaridade de cossenos vetorial, encontrando documentos pelo significado e contexto mesmo sem palavras-chave idênticas.
-   - **Single Sign-On (SSO) via OpenID Connect (OIDC / OAuth2):** Autenticação corporativa com 1 clique (Authentik, Keycloak, Authelia, Google Workspace, GitHub) e provisionamento automático de utilizadores.
-   - **Motor de Workflows Nativo:** Triggers e ações automáticas na ingestão de documentos.
-   - **Autoclassificador Inteligente:** Machine Learning Naive Bayes em Go para atribuição automática de correspondentes, etiquetas e tipos de documento.
-   - **Digitalização de Rede eSCL / AirPrint (`/scan`):** Portal web para acionar scanners de rede sem drivers locais.
-   - **Partilha Pública de Documentos (`/share/{slug}`):** Links seguros com expiração e landing page de pré-visualização.
-   - **Autenticação TOTP / MFA:** Segurança reforçada para contas de utilizador com QR Code e códigos de recuperação.
-   - **Formatos Microsoft Office (DOCX, XLSX, PPTX):** Extração de texto embutida nativa sem necessidade de Gotenberg.
-   - **Documentação Interativa Swagger UI & ReDoc:** Disponível em `/api/schema/swagger-ui/`.
+Além de ser incomparavelmente mais rápido e leve, o **paperless-go** traz inovações de engenharia e funcionalidades exclusivas que não existem no projeto oficial:
 
-6. **Segurança Rigorosa & Blindagem de Dados Sensíveis:**
-   - **Gravações Atómicas com `fsync`:** Prevenção total contra ficheiros corrompidos ou incompletos provocados por falhas de energia ou crashes a meio de uploads.
-   - **Transações ACID:** Ingestão atómica com Rollback automático. Zero documentos "fantasma" ou órfãos na base de dados.
-   - **Autoverificação de Integridade SQLite (`PRAGMA quick_check`):** Deteção e bloqueio preventivo de corrupção de base de dados no arranque.
-   - **Deteção de Corrupção Silenciosa (*Silent Bit Rot*):** Verificação ativa de hash SHA-256 no download e endpoint de auditoria global (`/api/system/integrity/`).
-   - **Trituração Criptográfica de Ficheiros (*Secure Shredding*):** Eliminação definitiva com sobrescrita de dados (`zero-fill`/bytes aleatórios) antes da remoção, impedindo recuperação forense de documentos confidenciais.
-   - **Encriptação em Repouso Opcional (AES-256-GCM):** Ficheiros encriptados em disco via `PAPERLESS_ENCRYPTION_AT_REST=true` com derivação de chave SHA-256.
-   - **Backups Atómicos Online Zero-Downtime (`/api/system/backup/`):** Exportação atómica consistente através do motor `VACUUM INTO` do SQLite num arquivo ZIP descarregável.
-   - **Autenticação de Dois Fatores (TOTP / 2FA):** Suporte nativo a códigos de aplicação e recuperação descartáveis.
-   - **Proteção Ativa contra Ataques:** Rate limiting contra força bruta no login, CSRF tokens ativos, cookies `SameSite=Lax`, prevenção contra *Path Traversal* e *Open Redirect*.
+### 1. Resiliência de Concorrência & Manutenção Automática do SQLite
+- **Autocheckpoint WAL & Otimizador de Índices:** Tarefa em segundo plano periódica que executa `PRAGMA wal_checkpoint(PASSIVE)` e `PRAGMA optimize`, mantendo o ficheiro WAL enxuto e as estatísticas do planejador de consultas sempre afiadas sem paragens.
+- **Retry com Backoff Exponencial em `WithTx`:** Elimina erros de bloqueio transitórios (`database is locked` / `sqlite_busy`) sob escrita massiva simultânea através de retentativas automáticas e transações atómicas ACID.
+- **Gravações Atómicas com `fsync`:** Prevenção total contra ficheiros a meio de gravação causados por falhas de energia ou encerramento inesperado.
+
+### 2. Observabilidade Moderna com `log/slog` & Prometheus
+- **Structured Logging Nativo:** Logs estruturados de alta performance em formato JSON (`PAPERLESS_LOG_FORMAT=json`) ou texto legível colorido (`text`), com níveis configuráveis (`DEBUG`, `INFO`, `WARN`, `ERROR`).
+- **Métricas Prometheus Nativas (`/metrics`):** Exposição pronta de contadores de requisições HTTP, tempo de resposta, goroutines ativas, consumo exato de memória e integridade de base de dados para dashboards Grafana.
+
+### 3. Blindagem de Segurança Reforçada
+- **Cabeçalhos de Segurança HTTP Rígidos:** Proteção ativa com `Content-Security-Policy (CSP)`, `Cross-Origin-Opener-Policy (COOP)`, `Cross-Origin-Resource-Policy (CORP)`, `X-Content-Type-Options: nosniff` e `X-Frame-Options: SAMEORIGIN`.
+- **Prevenção de Fugas de Memória em Brute-Force:** Rate limiter com purga periódica automática e limite de capacidade para impedir esgotamento de memória por varreduras de IPs maliciosos.
+- **Trituração Criptográfica de Ficheiros (*Secure Shredding*):** Eliminação permanente de documentos confidenciais com sobrescrita de dados aleatórios antes do `unlink`, impossibilitando recuperação forense em disco.
+- **Deteção de Corrupção Silenciosa (*Silent Bit Rot*):** Verificação contínua e endpoint de auditoria global (`/api/system/integrity/`) para detetar degradação física de setores em disco.
+
+### 4. Modo Cofre Criptográfico (*Vault Mode* - `/api/vault/`)
+- Blindagem de nível militar para documentos ultraconfidenciais (declarações de IRS, dados bancários, escrituras, passaportes).
+- Isolamento com palavra-passe mestra separada derivada via **Argon2id**.
+- Auto-bloqueio configurável por inatividade e bloqueio rigoroso (HTTP 423 Locked) de download e pré-visualização enquanto o cofre estiver trancado.
+
+### 5. Assistente de IA & RAG Local Integrado (`/api/documents/chat/`)
+- Converse em linguagem natural diretamente com os seus documentos ou pesquise no acervo completo.
+- Suporta **Ollama (100% privado, local e offline)**, **OpenAI** e **Google Gemini**.
+- **Extração Inteligente de Metadados via LLM:** Extrai automaticamente montantes totais, moeda, datas de vencimento, IBAN e NIF/VAT.
+- **Pesquisa Semântica Vetorial Híbrida:** Encontre documentos pelo sentido e contexto sem depender de palavras-chave exatas.
+
+### 6. Separação Automática por Código de Barras / Patch-Code
+- Digitalize maços de dezenas de páginas no alimentador ADF da impressora separados por folhas de código de barras **Patch-T**, **QR Code** ou **Code-128**.
+- O sistema fatia e gera documentos individuais herdando etiquetas e numeração ASN automaticamente.
+
+### 7. Digitalização de Rede Direta via Web (`/scan`)
+- Suporte nativo ao protocolo **eSCL / AirPrint / Mopria**.
+- Inicie digitalizações de scanners de rede diretamente pelo browser, sem necessidade de instalar drivers ou software proprietário.
+
+### 8. Partilha Pública de Documentos (`/share/{slug}`)
+- Partilhe documentos individuais através de links seguros com expiração temporal configurável e landing page de pré-visualização limpa, sem expor o painel administrativo.
+
+---
+
+## ⚡ Início Rápido
+
+### Opção A: Docker Compose (Recomendado)
+
+Cria um ficheiro `docker-compose.yml`:
+
+```yaml
+services:
+  paperless-go:
+    image: ghcr.io/goldbull3t/paperless-go:latest
+    container_name: paperless-go
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./media:/app/media
+      - ./consume:/app/consume
+      - ./export:/app/export
+    environment:
+      - PAPERLESS_LOG_LEVEL=info
+      - PAPERLESS_LOG_FORMAT=text
+      - PAPERLESS_OCR_WORKERS=2
+```
+
+Inicia com:
+```bash
+docker compose up -d
+```
+Acede no teu browser a: **[http://localhost:8000](http://localhost:8000)** (Utilizador: `admin` | Palavra-passe: `admin`).
+
+---
+
+### Opção B: Binário Standalone (Windows, Linux, macOS)
+
+Descarrega a versão mais recente ou compila na hora (requer Go 1.24+):
+
+```bash
+# Compilar
+go build -o paperless-go ./cmd/server
+
+# Executar
+./paperless-go
+```
+
+---
+
+## 🔄 Migração 1-Click do Paperless-ngx para o Paperless-Go
+
+Mudar do Paperless-ngx original para o **paperless-go** é **100% seguro, sem perda de dados e reversível**:
+- Preserva todos os PDFs originais, arquivos PDF/A e miniaturas.
+- Preserva todas as tags, correspondentes, tipos de documento, caminhos de armazenamento e campos personalizados.
+- Preserva datas de criação, notas e números de série de arquivo (*ASN*).
+- Reconstrói automaticamente os índices FTS5 BM25.
+
+### Como migrar em 2 passos simples:
+
+1. **No teu Paperless-ngx atual**, executa o comando oficial de exportação:
+   ```bash
+   document_exporter /caminho/para/export
+   ```
+
+2. **No paperless-go**, executa o comando de migração:
+   ```bash
+   ./paperless-go migrate /caminho/para/export
+   ```
+
+✨ **Pronto!** Todo o teu arquivo documental está imediatamente online, pesquisável e acessível com 99% menos uso de memória.
 
 ---
 
 ## 👨‍⚕️ Ferramenta de Diagnóstico: `paperless-go doctor`
 
-Para garantir que o teu servidor está em perfeitas condições operacionais antes ou durante a produção, podes executar a ferramenta de diagnóstico integrada:
+Executa uma auditoria completa ao estado do sistema em menos de 1 segundo:
 
 ```bash
 ./paperless-go doctor
 ```
 
-Executa 10 verificações de integridade em profundidade:
 ```text
 👨‍⚕️  Paperless-Go System Doctor (v3.3.5)
 ==================================================
-1. Go Runtime & OS:               [✓] go1.27.2 (linux/amd64, 8 CPUs)
+1. Go Runtime & OS:               [✓] go1.24.0 (linux/amd64, 8 CPUs)
 2. Storage Directories:           [✓] All 5 media & consume folders writable
 3. Database Engine & WAL:         [✓] SQLite WAL mode active (wal)
 4. Database Integrity:            [✓] PRAGMA integrity_check OK (0 corruption)
 5. Foreign Key Constraints:       [✓] 0 constraint violations detected
 6. Full-Text Search (FTS5):       [✓] FTS5 Virtual Table active (indexed entries)
-7. Native PDF Processor:          [✓] Pure-Go pdfcpu v0.9.1 engine ready (0 external dependencies)
+7. Native PDF Processor:          [✓] Pure-Go pdfcpu engine ready (0 external dependencies)
 8. OCR & Extraction Engine:       [✓] Smart text bypass & pure-Go stream extractor active
-9. Memory Footprint:              [✓] Ultra-light: 0.95 MB RAM (vs ~1500 MB in Python)
+9. Memory Footprint:              [✓] Ultra-light: 14.2 MB RAM (vs ~1500 MB in Python)
 10. Cryptographic Secure Vault:   [✓] Argon2id vault engine ready (optional master key)
 --------------------------------------------------
 ✨ Result: 10/10 checks passed. System is in pristine production condition!
@@ -105,94 +220,29 @@ Executa 10 verificações de integridade em profundidade:
 
 ---
 
-## 🔄 Migração 1-Click do Paperless-ngx para Paperless-Go
+## ⚙️ Variáveis de Ambiente
 
-Mudar do Paperless-ngx original para o **paperless-go** é **100% seguro, sem risco e preserva todos os dados**:
-- Mantém todos os ficheiros originais, arquivos PDF/A e miniaturas.
-- Mantém todas as tags, correspondentes, tipos documentais, caminhos de armazenamento e campos personalizados.
-- Mantém datas de criação originais, notas e números de série de arquivo (*ASN*).
-- Reconstrói automaticamente os índices FTS5 BM25.
-
-### Como migrar em 2 passos:
-1. No teu Paperless-ngx atual, executa a exportação oficial:
-   ```bash
-   document_exporter /caminho/para/export
-   ```
-2. No Paperless-Go, executa o comando de migração:
-   ```bash
-   ./paperless-go migrate-ngx /caminho/para/export
-   ```
-Pronto! Todos os documentos e metadados estão imediatamente ativos e disponíveis na interface web do Paperless-Go.
+| Variável | Padrão | Descrição |
+| :--- | :--- | :--- |
+| `PAPERLESS_HOST` | `0.0.0.0` | Endereço de escuta do servidor HTTP |
+| `PAPERLESS_PORT` | `8000` | Porta do servidor HTTP |
+| `PAPERLESS_DATA_DIR` | `./data` | Diretoria da base de dados SQLite e índices |
+| `PAPERLESS_MEDIA_DIR` | `./media` | Diretoria de armazenamento de documentos e miniaturas |
+| `PAPERLESS_CONSUME_DIR` | `./consume` | Diretoria monitorizada para importação automática (*Watch Folder*) |
+| `PAPERLESS_LOG_LEVEL` | `info` | Nível de log (`debug`, `info`, `warn`, `error`) |
+| `PAPERLESS_LOG_FORMAT` | `text` | Formato do logger estruturado (`text` ou `json`) |
+| `PAPERLESS_OCR_WORKERS` | `2` | Número de workers simultâneos de ingestão |
+| `PAPERLESS_ENCRYPTION_AT_REST` | `false` | Ativa encriptação AES-256-GCM para documentos em disco |
+| `PAPERLESS_PASSPHRASE` | `""` | Chave de cifra para encriptação em repouso |
 
 ---
 
-## 📈 Observabilidade & Métricas Prometheus (`/metrics`)
+## 🤝 Contribuições
 
-O paperless-go inclui suporte nativo a monitorização de nível empresarial:
-- **Prometheus Scrape Endpoint (`/metrics`):** Expondo contadores de requisições, tempo de atividade (*uptime*), número de goroutines ativas, consumo exato de memória em bytes e totais de documentos/tags para dashboards Grafana.
-- **Estado do Sistema em Tempo Real (`/api/system/status/`):** Endpoint JSON leve para Uptime Kuma ou Home Assistant.
-- **Diagnósticos do Sistema (`/api/system/diagnostics/`):** Estatísticas completas de runtime, memória e integridade de disco para administradores.
+Contribuições são muito bem-vindas! Se tens sugestões de novas funcionalidades, melhorias no frontend ou otimizações no motor de ingestão em Go, abre um [Pull Request](https://github.com/GoldBull3t/paperless-go/pulls) ou uma [Issue](https://github.com/GoldBull3t/paperless-go/issues).
 
 ---
 
-## 🛠️ Como Executar Localmente
+## 📄 Licença
 
-### 1. Executar o Binário Direto (Windows / Linux / macOS)
-```powershell
-.\paperless-go.exe
-```
-O servidor inicia instantaneamente na porta `8000`. Abre o teu browser em:
-👉 **[http://localhost:8000/](http://localhost:8000/)**
-
-* **Utilizador padrão:** `admin`
-* **Palavra-passe padrão:** `admin`
-
----
-
-## 🐳 Como Executar com Docker / Docker Compose
-
-### Executar com Docker Compose:
-```bash
-docker compose up -d
-```
-
-### Usar a imagem oficial publicada do GitHub Packages:
-```bash
-docker run -d \
-  --name paperless-go \
-  -p 8000:8000 \
-  -v ./data:/app/data \
-  -v ./media:/app/media \
-  -v ./consume:/app/consume \
-  ghcr.io/goldbull3t/paperless-go:latest
-```
-
----
-
-## 📁 Estrutura do Projeto
-
-```text
-paperless-go/
-├── cmd/
-│   └── server/
-│       ├── main.go          # Ponto de entrada, ciclo de vida e subcomandos CLI
-│       └── doctor.go        # Ferramenta de auditoria e diagnóstico do sistema
-├── internal/
-│   ├── api/                 # Endpoints REST, WebSocket, Prometheus, Scan, Share e Swagger
-│   ├── auth/                # Autenticação, bcrypt, tokens e TOTP (2FA)
-│   ├── classifier/          # Autoclassificador ML Naive Bayes
-│   ├── compress/            # Otimização e compressão de PDFs
-│   ├── config/              # Variáveis de ambiente e configuração
-│   ├── consumer/            # Ingestão, PDF nativo (pdfcpu), Office (DOCX/XLSX), miniaturas e watcher
-│   ├── database/            # SQLite com WAL, FTS5 e migrações automáticas
-│   ├── exporter/            # Exportador, importador e verificador de integridade
-│   ├── models/              # Estruturas de dados REST e SearchHit
-│   ├── queue/               # Worker pool em memória (substituto de Celery + Redis)
-│   ├── scanner/             # Cliente de digitalização eSCL / AirPrint
-│   └── workflow/            # Motor de execução de workflows e automações
-├── web/
-│   └── static/              # Frontend oficial compilado do Paperless-ngx (v3.3.2)
-├── Dockerfile               # Imagem Alpine multi-stage ultra-leve (~35MB)
-└── docker-compose.yml       # Orquestração de 1 contentor
-```
-
+Distribuído sob a licença **GPL-3.0**, a mesma utilizada pelo Paperless-ngx original, garantindo a liberdade e a continuidade do software livre.

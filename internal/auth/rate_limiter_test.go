@@ -1,4 +1,4 @@
-﻿package auth
+package auth
 
 import (
 	"testing"
@@ -36,6 +36,39 @@ func TestRateLimiter(t *testing.T) {
 	limiter.Reset(key)
 	if ok, _ := limiter.Allow(key); !ok {
 		t.Fatalf("Expected key to be allowed immediately after reset")
+	}
+}
+
+func TestRateLimiter_Pruning(t *testing.T) {
+	// Window 20ms, block 30ms -> total retention 50ms
+	limiter := NewRateLimiter(2, 20*time.Millisecond, 30*time.Millisecond)
+
+	limiter.RecordFailure("ip-1")
+	limiter.RecordFailure("ip-2")
+	limiter.RecordFailure("ip-3")
+
+	if count := limiter.Count(); count != 3 {
+		t.Fatalf("Expected 3 entries tracked, got %d", count)
+	}
+
+	// Sleep past the retention period
+	time.Sleep(60 * time.Millisecond)
+
+	// Pruning should clear expired keys
+	limiter.Prune()
+	if count := limiter.Count(); count != 0 {
+		t.Fatalf("Expected 0 entries tracked after prune, got %d", count)
+	}
+
+	// Also verify Allow() deletes empty key on check
+	limiter.RecordFailure("ip-4")
+	time.Sleep(30 * time.Millisecond)
+	allowed, _ := limiter.Allow("ip-4")
+	if !allowed {
+		t.Fatalf("Expected ip-4 to be allowed after window expired")
+	}
+	if count := limiter.Count(); count != 0 {
+		t.Fatalf("Expected key to be removed from map after Allow() with no valid entries, got %d", count)
 	}
 }
 

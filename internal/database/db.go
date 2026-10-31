@@ -5,8 +5,11 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"log/slog"
+	"math/rand"
 	"os"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -48,13 +51,72 @@ func Open(dbPath string) (*DB, error) {
 	return wrapped, nil
 }
 
-// WithTx executes the provided function within an atomic transaction.
+// StartMaintenance initiates periodic background WAL checkpointing and query planner optimization.
+func (db *DB) StartMaintenance(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 1 * time.Hour
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				db.RunMaintenance()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+// RunMaintenance executes WAL checkpointing and statistics optimization
+func (db *DB) RunMaintenance() {
+	var busy, logCount, checkpointed int
+	err := db.QueryRow("PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &logCount, &checkpointed)
+	if err != nil {
+		slog.Warn("SQLite WAL checkpoint maintenance failed", "err", err)
+	} else {
+		slog.Debug("SQLite WAL checkpoint completed", "busy", busy, "log_frames", logCount, "checkpointed_frames", checkpointed)
+	}
+
+	if _, err := db.Exec("PRAGMA optimize"); err != nil {
+		slog.Warn("SQLite optimizer maintenance failed", "err", err)
+	}
+}
+
+func isBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "sqlite_busy") || strings.Contains(msg, "busy")
+}
+
+// WithTx executes the provided function within an atomic transaction with automatic retry on busy locks.
 // It automatically handles rollback in case of error or panic, and commits on success.
 func (db *DB) WithTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelDefault})
-	if err != nil {
+	var tx *sql.Tx
+	var err error
+
+	// Retry up to 3 times on transient SQLite busy locks with jittered backoff
+	for attempt := 0; attempt < 3; attempt++ {
+		tx, err = db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelDefault})
+		if err == nil {
+			break
+		}
+		if isBusyError(err) && attempt < 2 {
+			backoff := time.Duration(40*(attempt+1))*time.Millisecond + time.Duration(rand.Intn(20))*time.Millisecond
+			select {
+			case <-time.After(backoff):
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
 		return fmt.Errorf("failed to begin atomic database transaction: %w", err)
 	}
+
 	defer func() {
 		if p := recover(); p != nil {
 			_ = tx.Rollback()

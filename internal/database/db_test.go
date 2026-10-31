@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func setupTestDB(t *testing.T) (*DB, string) {
@@ -106,5 +107,22 @@ func TestWithTx_RollbackOnPanic(t *testing.T) {
 		}
 		panic("critical crash inside transaction")
 	})
+}
+
+func TestDB_Maintenance(t *testing.T) {
+	db, tmpDir := setupTestDB(t)
+	defer os.RemoveAll(tmpDir)
+	defer db.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Direct execution
+	db.RunMaintenance()
+
+	// Periodic maintenance startup & shutdown
+	db.StartMaintenance(ctx, 50*time.Millisecond)
+	time.Sleep(120 * time.Millisecond)
+	cancel()
 }
 

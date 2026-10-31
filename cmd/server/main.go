@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,22 +17,31 @@ import (
 	"paperless-go/internal/consumer"
 	"paperless-go/internal/database"
 	"paperless-go/internal/exporter"
+	"paperless-go/internal/logger"
 	"paperless-go/internal/queue"
 )
 
 func main() {
-	log.Println("==================================================")
-	log.Println("⚡ paperless-go: Lightweight Paperless-ngx Engine")
-	log.Println("==================================================")
-
-	// 1. Load configuration
+	// 1. Load configuration & initialize structured logging
 	cfg := config.Load()
-	log.Printf("Loaded configuration. DataDir: %s, MediaDir: %s", cfg.DataDir, cfg.MediaDir)
+	logger.Setup(cfg.LogLevel, cfg.LogFormat)
+
+	slog.Info("⚡ Starting paperless-go: Lightweight Paperless-ngx Engine",
+		"data_dir", cfg.DataDir,
+		"media_dir", cfg.MediaDir,
+		"log_level", cfg.LogLevel,
+		"log_format", cfg.LogFormat,
+	)
+
+	// Context for graceful shutdown of background services & maintenance routines
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
 
 	// 2. Open database & apply migrations
 	db, err := database.Open(cfg.DatabasePath)
 	if err != nil {
-		log.Fatalf("Database initialization failed: %v", err)
+		slog.Error("Database initialization failed", "error", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 
@@ -114,10 +124,14 @@ func main() {
 	// 3. Initialize Auth Service & default admin
 	authSvc := auth.NewService(db, cfg)
 	if err := authSvc.EnsureDefaultAdmin("admin", "admin"); err != nil {
-		log.Fatalf("Failed to initialize default admin: %v", err)
+		slog.Error("Failed to initialize default admin", "error", err)
+		os.Exit(1)
 	}
 
-	// 4. Initialize In-Memory Queue & WebSocket Hub
+	// 4. Start Continuous SQLite WAL & Query Planner Maintenance
+	db.StartMaintenance(rootCtx, 1*time.Hour)
+
+	// 5. Initialize In-Memory Queue & WebSocket Hub
 	taskQueue := queue.NewQueue(db, cfg.OCRWorkerCount)
 	defer taskQueue.Close()
 
@@ -125,16 +139,16 @@ func main() {
 	defer wsHub.Close()
 	taskQueue.SetBroadcaster(wsHub)
 
-	// 5. Initialize Document Consumer & Watcher
+	// 6. Initialize Document Consumer & Watcher
 	docConsumer := consumer.NewConsumer(db, cfg)
 	watcher := consumer.NewWatcher(cfg.ConsumeDir, docConsumer, taskQueue)
 	watcher.Start()
 	defer watcher.Stop()
 
-	// 6. Initialize HTTP Router
+	// 7. Initialize HTTP Router
 	router := api.NewRouter(cfg, db, authSvc, taskQueue, docConsumer, wsHub)
 
-	// 7. Start HTTP Server
+	// 8. Start HTTP Server
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	srv := &http.Server{
 		Addr:         addr,
@@ -145,24 +159,26 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("🚀 paperless-go server listening on http://%s", addr)
-		log.Printf("📱 Web UI available at http://localhost:%d/", cfg.Port)
+		slog.Info("🚀 paperless-go server listening", "addr", fmt.Sprintf("http://%s", addr), "ui", fmt.Sprintf("http://localhost:%d/", cfg.Port))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server listen failed: %v", err)
+			slog.Error("Server listen failed", "error", err)
+			os.Exit(1)
 		}
 	}()
 
-	// 8. Graceful shutdown
+	// 9. Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Shutting down paperless-go gracefully...")
+	slog.Info("Shutting down paperless-go gracefully...")
+	rootCancel() // Terminate background maintenance and workers
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("Server shutdown error: %v", err)
+		slog.Error("Server shutdown error", "error", err)
 	}
-	log.Println("paperless-go stopped successfully.")
+	slog.Info("paperless-go stopped successfully.")
 }

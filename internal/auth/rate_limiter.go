@@ -1,4 +1,4 @@
-﻿package auth
+package auth
 
 import (
 	"encoding/json"
@@ -55,15 +55,19 @@ type RateLimiter struct {
 	maxAttempts int
 	window      time.Duration
 	blockTime   time.Duration
+	lastPrune   time.Time
+	maxEntries  int
 }
 
-// NewRateLimiter creates a new thread-safe in-memory rate limiter
+// NewRateLimiter creates a new thread-safe in-memory rate limiter with automatic pruning
 func NewRateLimiter(maxAttempts int, window, blockTime time.Duration) *RateLimiter {
 	return &RateLimiter{
 		attempts:    make(map[string][]time.Time),
 		maxAttempts: maxAttempts,
 		window:      window,
 		blockTime:   blockTime,
+		lastPrune:   time.Now(),
+		maxEntries:  10000,
 	}
 }
 
@@ -82,7 +86,12 @@ func (l *RateLimiter) Allow(key string) (bool, time.Duration) {
 			valid = append(valid, t)
 		}
 	}
-	l.attempts[key] = valid
+
+	if len(valid) == 0 {
+		delete(l.attempts, key)
+	} else {
+		l.attempts[key] = valid
+	}
 
 	if len(valid) >= l.maxAttempts {
 		oldest := valid[0]
@@ -96,11 +105,18 @@ func (l *RateLimiter) Allow(key string) (bool, time.Duration) {
 	return true, 0
 }
 
-// RecordFailure records a failed authentication attempt
+// RecordFailure records a failed authentication attempt and prunes stale keys if necessary
 func (l *RateLimiter) RecordFailure(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.attempts[key] = append(l.attempts[key], time.Now())
+
+	now := time.Now()
+	l.attempts[key] = append(l.attempts[key], now)
+
+	// Periodically prune stale entries to prevent unbounded memory growth
+	if now.Sub(l.lastPrune) > 1*time.Minute || len(l.attempts) > l.maxEntries {
+		l.pruneLocked(now)
+	}
 }
 
 // Reset clears failure history for key on successful login
@@ -108,5 +124,49 @@ func (l *RateLimiter) Reset(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.attempts, key)
+}
+
+// Count returns the current number of tracked keys (useful for testing and monitoring)
+func (l *RateLimiter) Count() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.attempts)
+}
+
+// Prune removes all entries that are older than window + blockTime
+func (l *RateLimiter) Prune() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pruneLocked(time.Now())
+}
+
+func (l *RateLimiter) pruneLocked(now time.Time) {
+	cutoff := now.Add(-(l.window + l.blockTime))
+	for k, times := range l.attempts {
+		var valid []time.Time
+		for _, t := range times {
+			if t.After(cutoff) {
+				valid = append(valid, t)
+			}
+		}
+		if len(valid) == 0 {
+			delete(l.attempts, k)
+		} else {
+			l.attempts[k] = valid
+		}
+	}
+
+	// Hard capacity limit: if still exceeding maxEntries, evict arbitrary keys to prevent OOM
+	if len(l.attempts) > l.maxEntries {
+		target := l.maxEntries * 8 / 10
+		for k := range l.attempts {
+			delete(l.attempts, k)
+			if len(l.attempts) <= target {
+				break
+			}
+		}
+	}
+
+	l.lastPrune = now
 }
 
