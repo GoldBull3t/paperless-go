@@ -121,3 +121,4 @@ XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX
    - **Recomendação:** Para conformidade estrita de descarte físico, encriptar todo o volume do disco de armazenamento subjacente.
 4. **Metadados:**
    - O título, data de criação e metadados estruturais do documento continuam visíveis na base de dados SQLite indexados pelo FTS5 (a menos que a base de dados SQLite completa seja cifrada ao nível do volume do host). Apenas o acesso via API bloqueia a consulta de metadados quando o vault está bloqueado.
+

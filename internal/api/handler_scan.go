@@ -1,28 +1,33 @@
-﻿package api
+package api
 
 import (
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"paperless-go/internal/config"
 	"paperless-go/internal/consumer"
+	"paperless-go/internal/database"
 	"paperless-go/internal/queue"
 	"paperless-go/internal/scanner"
 )
 
 type ScanHandler struct {
+	db       *database.DB
 	client   *scanner.ESCLClient
 	consumer *consumer.Consumer
 	queue    *queue.Queue
 	cfg      *config.Config
 }
 
-func NewScanHandler(cfg *config.Config, c *consumer.Consumer, q *queue.Queue) *ScanHandler {
+func NewScanHandler(db *database.DB, cfg *config.Config, c *consumer.Consumer, q *queue.Queue) *ScanHandler {
 	return &ScanHandler{
+		db:       db,
 		client:   scanner.NewESCLClient(),
 		consumer: c,
 		queue:    q,
@@ -30,7 +35,7 @@ func NewScanHandler(cfg *config.Config, c *consumer.Consumer, q *queue.Queue) *S
 	}
 }
 
-// GetScanners lists available / tested eSCL scanners
+// GetScanners lists saved network scanners or probes a URL query parameter
 func (h *ScanHandler) GetScanners(w http.ResponseWriter, r *http.Request) {
 	testURL := r.URL.Query().Get("url")
 	if testURL != "" {
@@ -44,22 +49,152 @@ func (h *ScanHandler) GetScanners(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Default known/configurable scanners list
-	defaultScanners := []scanner.ScannerInfo{
-		{
-			Name:                 "Network AirPrint / eSCL Scanner",
-			URL:                  "http://localhost:8080/eSCL",
-			MakeAndModel:         "Apple AirPrint / Mopria Compliant",
-			Status:               "Ready",
-			SupportedColorModes:  []string{"RGB24", "Grayscale8", "BlackAndWhite1"},
-			SupportedResolutions: []int{150, 200, 300, 600},
-			SupportedSources:     []string{"Platen", "Feeder"},
-			SupportedFormats:     []string{"application/pdf", "image/jpeg"},
-		},
+	var results []scanner.ScannerInfo
+	if h.db != nil {
+		rows, err := h.db.Query(`
+			SELECT id, name, url, make_and_model, last_status,
+			       supported_resolutions_json, supported_color_modes_json,
+			       supported_sources_json, supported_formats_json
+			FROM network_scanners
+			ORDER BY id ASC
+		`)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var s scanner.ScannerInfo
+				var resJSON, cmJSON, srcJSON, fmtJSON string
+				if err := rows.Scan(&s.ID, &s.Name, &s.URL, &s.MakeAndModel, &s.Status, &resJSON, &cmJSON, &srcJSON, &fmtJSON); err == nil {
+					_ = json.Unmarshal([]byte(resJSON), &s.SupportedResolutions)
+					_ = json.Unmarshal([]byte(cmJSON), &s.SupportedColorModes)
+					_ = json.Unmarshal([]byte(srcJSON), &s.SupportedSources)
+					_ = json.Unmarshal([]byte(fmtJSON), &s.SupportedFormats)
+					results = append(results, s)
+				}
+			}
+		}
+	}
+
+	if len(results) == 0 && strings.Contains(r.URL.Path, "/scan/scanners") {
+		results = []scanner.ScannerInfo{
+			{
+				ID:                   1,
+				Name:                 "Network eSCL Scanner",
+				URL:                  "http://localhost:8080/eSCL",
+				MakeAndModel:         "eSCL 2.0 Driverless Network Scanner",
+				Status:               "Idle",
+				SupportedColorModes:  []string{"RGB24", "Grayscale8", "BlackAndWhite1"},
+				SupportedResolutions: []int{150, 200, 300, 600},
+				SupportedSources:     []string{"Platen", "Feeder"},
+				SupportedFormats:     []string{"application/pdf", "image/jpeg"},
+			},
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(defaultScanners)
+	_ = json.NewEncoder(w).Encode(results)
+}
+
+// AddScanner registers and verifies an eSCL network scanner in the database
+func (h *ScanHandler) AddScanner(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil || strings.TrimSpace(input.URL) == "" {
+		http.Error(w, `{"detail": "url is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	cleanURL, err := scanner.CleanBaseURL(input.URL)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"detail": "invalid URL: %v"}`, err), http.StatusBadRequest)
+		return
+	}
+
+	info, err := h.client.QueryCapabilities(cleanURL)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"detail": "failed querying scanner capabilities: %v"}`, err), http.StatusBadRequest)
+		return
+	}
+
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		name = info.Name
+	}
+
+	resJSON, _ := json.Marshal(info.SupportedResolutions)
+	cmJSON, _ := json.Marshal(info.SupportedColorModes)
+	srcJSON, _ := json.Marshal(info.SupportedSources)
+	fmtJSON, _ := json.Marshal(info.SupportedFormats)
+
+	res, err := h.db.Exec(`
+		INSERT INTO network_scanners (
+			name, url, make_and_model, last_status,
+			supported_resolutions_json, supported_color_modes_json,
+			supported_sources_json, supported_formats_json, updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(url) DO UPDATE SET
+			name = excluded.name,
+			make_and_model = excluded.make_and_model,
+			last_status = excluded.last_status,
+			supported_resolutions_json = excluded.supported_resolutions_json,
+			supported_color_modes_json = excluded.supported_color_modes_json,
+			supported_sources_json = excluded.supported_sources_json,
+			supported_formats_json = excluded.supported_formats_json,
+			updated_at = CURRENT_TIMESTAMP
+	`, name, cleanURL, info.MakeAndModel, info.Status, string(resJSON), string(cmJSON), string(srcJSON), string(fmtJSON))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	lastID, _ := res.LastInsertId()
+	info.ID = int(lastID)
+	info.Name = name
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(info)
+}
+
+// GetScannerByID loads a registered scanner and performs a live status probe
+func (h *ScanHandler) GetScannerByID(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	var s scanner.ScannerInfo
+	var resJSON, cmJSON, srcJSON, fmtJSON string
+	err := h.db.QueryRow(`
+		SELECT id, name, url, make_and_model, last_status,
+		       supported_resolutions_json, supported_color_modes_json,
+		       supported_sources_json, supported_formats_json
+		FROM network_scanners
+		WHERE id = ?
+	`, id).Scan(&s.ID, &s.Name, &s.URL, &s.MakeAndModel, &s.Status, &resJSON, &cmJSON, &srcJSON, &fmtJSON)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	_ = json.Unmarshal([]byte(resJSON), &s.SupportedResolutions)
+	_ = json.Unmarshal([]byte(cmJSON), &s.SupportedColorModes)
+	_ = json.Unmarshal([]byte(srcJSON), &s.SupportedSources)
+	_ = json.Unmarshal([]byte(fmtJSON), &s.SupportedFormats)
+
+	// Live status probe
+	if st, err := h.client.QueryStatus(s.URL); err == nil {
+		s.Status = st.State
+		s.AdfState = st.AdfState
+		_, _ = h.db.Exec("UPDATE network_scanners SET last_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", st.State, id)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s)
+}
+
+// DeleteScanner removes a registered network scanner
+func (h *ScanHandler) DeleteScanner(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	_, _ = h.db.Exec("DELETE FROM network_scanners WHERE id = ?", id)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // TestScanner probes an eSCL scanner endpoint and returns its capabilities
@@ -85,11 +220,13 @@ func (h *ScanHandler) TestScanner(w http.ResponseWriter, r *http.Request) {
 // TriggerScan initiates an eSCL scan and queues the document for consumption
 func (h *ScanHandler) TriggerScan(w http.ResponseWriter, r *http.Request) {
 	var opts struct {
+		ScannerID  int    `json:"scanner_id"`
 		ScannerURL string `json:"scanner_url"`
 		Name       string `json:"name"`
 		Resolution int    `json:"resolution"`
 		ColorMode  string `json:"color_mode"`
 		Source     string `json:"source"`
+		Duplex     bool   `json:"duplex"`
 		Format     string `json:"format"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
@@ -97,8 +234,12 @@ func (h *ScanHandler) TriggerScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if opts.ScannerURL == "" && opts.ScannerID > 0 && h.db != nil {
+		_ = h.db.QueryRow("SELECT url FROM network_scanners WHERE id = ?", opts.ScannerID).Scan(&opts.ScannerURL)
+	}
+
 	if opts.ScannerURL == "" {
-		http.Error(w, "scanner_url is required", http.StatusBadRequest)
+		http.Error(w, "scanner_url or scanner_id is required", http.StatusBadRequest)
 		return
 	}
 	if opts.Name == "" {
@@ -122,6 +263,7 @@ func (h *ScanHandler) TriggerScan(w http.ResponseWriter, r *http.Request) {
 		Resolution: opts.Resolution,
 		ColorMode:  opts.ColorMode,
 		Source:     opts.Source,
+		Duplex:     opts.Duplex,
 		Format:     opts.Format,
 	}
 
@@ -283,8 +425,8 @@ func (h *ScanHandler) ScanPage(w http.ResponseWriter, r *http.Request) {
 
 	<main class="container py-4" style="max-width: 640px;">
 		<div class="card-scan">
-			<h2 class="h4 mb-3">AirPrint / eSCL Network Scanner</h2>
-			<p class="text-muted small mb-4">Directly scan from Apple AirPrint &amp; Mopria eSCL compliant multifunction printers and ingest documents automatically into Paperless.</p>
+			<h2 class="h4 mb-3">eSCL Driverless Network Scanner</h2>
+			<p class="text-muted small mb-4">Directly scan from network multifunction printers using open eSCL 2.0 standard protocol and ingest documents automatically into Paperless.</p>
 
 			<form id="scanForm">
 				<div class="mb-3">

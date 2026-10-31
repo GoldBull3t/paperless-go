@@ -330,6 +330,20 @@ CREATE TABLE IF NOT EXISTS document_embeddings (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS network_scanners (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    url TEXT UNIQUE NOT NULL,
+    make_and_model TEXT DEFAULT '',
+    last_status TEXT DEFAULT 'Unknown',
+    supported_resolutions_json TEXT DEFAULT '[]',
+    supported_color_modes_json TEXT DEFAULT '[]',
+    supported_sources_json TEXT DEFAULT '[]',
+    supported_formats_json TEXT DEFAULT '[]',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
     title,
     content

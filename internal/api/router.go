@@ -110,7 +110,7 @@ func NewRouter(
 	workflowsH := NewWorkflowsHandler(db)
 	searchH := NewSearchHandler(db, consumer)
 	bulkH := NewBulkObjectsHandler(db)
-	scanH := NewScanHandler(cfg, consumer, q)
+	scanH := NewScanHandler(db, cfg, consumer, q)
 	shareLinksH := NewShareLinksHandler(db, cfg)
 	schemaH := NewSchemaHandler()
 	mailH := NewMailHandler(db)
@@ -364,10 +364,18 @@ func NewRouter(
 			})
 
 			// eSCL Network Scanning (Feature #19)
+			r.Route("/scanners", func(r chi.Router) {
+				r.Get("/", scanH.GetScanners)
+				r.Post("/", scanH.AddScanner)
+				r.Post("/test/", scanH.TestScanner)
+				r.Get("/{id}/", scanH.GetScannerByID)
+				r.Delete("/{id}/", scanH.DeleteScanner)
+			})
 			r.Route("/scan", func(r chi.Router) {
 				r.Get("/scanners/", scanH.GetScanners)
 				r.Post("/scanners/test/", scanH.TestScanner)
 				r.Post("/scan/", scanH.TriggerScan)
+				r.Post("/", scanH.TriggerScan)
 			})
 
 			// Secure Cryptographic Vault (Feature #7)

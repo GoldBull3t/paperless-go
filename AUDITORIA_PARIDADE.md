@@ -101,6 +101,7 @@
 | REQ-OCR-01 | Configuração Avançada de OCR | src/paperless/parsers/tesseract.py | internal/consumer/parser.go:GenerateArchivePDFWithConfig | **COMPLETA** | Parâmetros dinâmicos para modos skip, redo, force, idioma, deskew e rotate. | Nenhuma. | Passa em TestOCRConfiguration. |
 | REQ-CLI-01 | Exportador e Importador (document_exporter, importer) | src/documents/management/commands/document_exporter.py | internal/exporter/exporter.go, cmd/server/main.go | **COMPLETA** | Subcomandos export, import e sanity_check com manifest.json. | Nenhuma. | Passa em TestCLIExportImportSanity. |
 | REQ-CLI-02 | Reorganização Física de Ficheiros (document_renamer) | src/documents/management/commands/document_renamer.py | internal/consumer/renamer.go, cmd/server/main.go | **COMPLETA** | Comando rename reorganiza retroativamente ficheiros no disco. | Nenhuma. | Passa em TestDocumentRenamer. |
+| REQ-SCN-01 | Digitalização de Rede eSCL (/api/scanners/, /api/scan/) | eSCL / PWG Scan Service 2.0 | internal/scanner/escl.go, internal/api/handler_scan.go | **COMPLETA** | Suporte a eSCL driverless scanning com persistência na DB, duplex, ADF multi-páginas e conformidade estrita aos padrões abertos (sem alegações indevidas de certificação AirPrint/Mopria sem testes em hardware proprietário). | Nenhuma. | Passa em TestESCLClientWorkflow e TestNetworkScannersAPI_CRUDAndTriggerScan. |
 
 ---
 

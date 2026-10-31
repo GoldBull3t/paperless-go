@@ -330,6 +330,29 @@ func (db *DB) migrate() error {
 				return nil
 			},
 		},
+		{
+			version: 6,
+			name:    "0006_network_scanners",
+			run: func(db *DB) error {
+				stmt := `CREATE TABLE IF NOT EXISTS network_scanners (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					name TEXT NOT NULL,
+					url TEXT UNIQUE NOT NULL,
+					make_and_model TEXT DEFAULT '',
+					last_status TEXT DEFAULT 'Unknown',
+					supported_resolutions_json TEXT DEFAULT '[]',
+					supported_color_modes_json TEXT DEFAULT '[]',
+					supported_sources_json TEXT DEFAULT '[]',
+					supported_formats_json TEXT DEFAULT '[]',
+					created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+					updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+				);`
+				if _, err := db.Exec(stmt); err != nil {
+					return fmt.Errorf("migration 6 failed creating network_scanners: %w", err)
+				}
+				return nil
+			},
+		},
 	}
 
 	for _, m := range migrations {
