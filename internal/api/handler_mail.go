@@ -3,6 +3,8 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -63,7 +65,10 @@ func (h *MailHandler) ListAccounts(w http.ResponseWriter, r *http.Request) {
 			allIDs = append(allIDs, a.ID)
 		}
 	}
-	_ = rows.Err()
+	if err := rows.Err(); err != nil {
+		http.Error(w, fmt.Sprintf("cursor error fetching mail accounts: %v", err), http.StatusInternalServerError)
+		return
+	}
 
 	if results == nil {
 		results = []models.MailAccount{}
@@ -285,7 +290,9 @@ func (h *MailHandler) ListRules(w http.ResponseWriter, r *http.Request) {
 			&mr.AttachmentType, &mr.ConsumptionScope, &mr.PdfLayout, &mr.StopProcessing, &ownerID,
 		)
 		if err == nil {
-			_ = json.Unmarshal([]byte(tagsJSON), &mr.AssignTags)
+			if err := json.Unmarshal([]byte(tagsJSON), &mr.AssignTags); err != nil {
+				log.Printf("[WARN] invalid tagsJSON in mail_rule %d: %v", mr.ID, err)
+			}
 			if mr.AssignTags == nil {
 				mr.AssignTags = []int{}
 			}
@@ -317,7 +324,10 @@ func (h *MailHandler) ListRules(w http.ResponseWriter, r *http.Request) {
 			allIDs = append(allIDs, mr.ID)
 		}
 	}
-	_ = rows.Err()
+	if err := rows.Err(); err != nil {
+		http.Error(w, fmt.Sprintf("cursor error fetching mail rules: %v", err), http.StatusInternalServerError)
+		return
+	}
 
 	if results == nil {
 		results = []models.MailRule{}
@@ -355,7 +365,9 @@ func (h *MailHandler) GetRule(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	_ = json.Unmarshal([]byte(tagsJSON), &mr.AssignTags)
+	if err := json.Unmarshal([]byte(tagsJSON), &mr.AssignTags); err != nil {
+		log.Printf("[WARN] invalid tagsJSON in mail_rule %d: %v", mr.ID, err)
+	}
 	if mr.AssignTags == nil {
 		mr.AssignTags = []int{}
 	}

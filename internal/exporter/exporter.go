@@ -1,11 +1,14 @@
 package exporter
 
 import (
+	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -322,11 +325,13 @@ func Import(db *database.DB, cfg *config.Config, sourceDir string) error {
 			if in, ok := item.Fields["is_inbox_tag"].(bool); ok {
 				inbox = in
 			}
-			_, _ = db.Exec(`
+			if _, err := db.Exec(`
 				INSERT INTO tags (id, name, slug, color, text_color, match, matching_algorithm, is_insensitive, is_inbox_tag)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(id) DO UPDATE SET name = excluded.name, slug = excluded.slug
-			`, item.PK, name, slug, color, textColor, match, algo, ins, inbox)
+			`, item.PK, name, slug, color, textColor, match, algo, ins, inbox); err != nil {
+				log.Printf("[WARN] Exporter failed importing tag %d (%s): %v", item.PK, name, err)
+			}
 
 		case "documents.correspondent":
 			name, _ := item.Fields["name"].(string)
@@ -340,11 +345,13 @@ func Import(db *database.DB, cfg *config.Config, sourceDir string) error {
 			if i, ok := item.Fields["is_insensitive"].(bool); ok {
 				ins = i
 			}
-			_, _ = db.Exec(`
+			if _, err := db.Exec(`
 				INSERT INTO correspondents (id, name, slug, match, matching_algorithm, is_insensitive)
 				VALUES (?, ?, ?, ?, ?, ?)
 				ON CONFLICT(id) DO UPDATE SET name = excluded.name, slug = excluded.slug
-			`, item.PK, name, slug, match, algo, ins)
+			`, item.PK, name, slug, match, algo, ins); err != nil {
+				log.Printf("[WARN] Exporter failed importing correspondent %d (%s): %v", item.PK, name, err)
+			}
 
 		case "documents.documenttype":
 			name, _ := item.Fields["name"].(string)
@@ -358,11 +365,13 @@ func Import(db *database.DB, cfg *config.Config, sourceDir string) error {
 			if i, ok := item.Fields["is_insensitive"].(bool); ok {
 				ins = i
 			}
-			_, _ = db.Exec(`
+			if _, err := db.Exec(`
 				INSERT INTO document_types (id, name, slug, match, matching_algorithm, is_insensitive)
 				VALUES (?, ?, ?, ?, ?, ?)
 				ON CONFLICT(id) DO UPDATE SET name = excluded.name, slug = excluded.slug
-			`, item.PK, name, slug, match, algo, ins)
+			`, item.PK, name, slug, match, algo, ins); err != nil {
+				log.Printf("[WARN] Exporter failed importing document_type %d (%s): %v", item.PK, name, err)
+			}
 
 		case "documents.storagepath":
 			name, _ := item.Fields["name"].(string)
@@ -376,21 +385,25 @@ func Import(db *database.DB, cfg *config.Config, sourceDir string) error {
 			if i, ok := item.Fields["is_insensitive"].(bool); ok {
 				ins = i
 			}
-			_, _ = db.Exec(`
+			if _, err := db.Exec(`
 				INSERT INTO storage_paths (id, name, path, match, matching_algorithm, is_insensitive)
 				VALUES (?, ?, ?, ?, ?, ?)
 				ON CONFLICT(id) DO UPDATE SET name = excluded.name, path = excluded.path
-			`, item.PK, name, path, match, algo, ins)
+			`, item.PK, name, path, match, algo, ins); err != nil {
+				log.Printf("[WARN] Exporter failed importing storage_path %d (%s): %v", item.PK, name, err)
+			}
 
 		case "documents.customfield":
 			name, _ := item.Fields["name"].(string)
 			dataType, _ := item.Fields["data_type"].(string)
 			extraBytes, _ := json.Marshal(item.Fields["extra_data"])
-			_, _ = db.Exec(`
+			if _, err := db.Exec(`
 				INSERT INTO custom_fields (id, name, data_type, extra_data)
 				VALUES (?, ?, ?, ?)
 				ON CONFLICT(id) DO UPDATE SET name = excluded.name, data_type = excluded.data_type, extra_data = excluded.extra_data
-			`, item.PK, name, dataType, string(extraBytes))
+			`, item.PK, name, dataType, string(extraBytes)); err != nil {
+				log.Printf("[WARN] Exporter failed importing custom_field %d (%s): %v", item.PK, name, err)
+			}
 
 		case "documents.customfieldinstance":
 			var fieldID, docID int
@@ -499,11 +512,13 @@ func Import(db *database.DB, cfg *config.Config, sourceDir string) error {
 				}
 			}
 
-			// Restore files
+			// Restore files with error logging
 			ext := filepath.Ext(origName)
 			srcOrig := filepath.Join(sourceDir, "originals", fmt.Sprintf("%07d%s", item.PK, ext))
 			destOrig := filepath.Join(cfg.MediaDir, "documents", "originals", fmt.Sprintf("%07d%s", item.PK, ext))
-			_ = copyFile(srcOrig, destOrig)
+			if err := copyFile(srcOrig, destOrig); err != nil {
+				log.Printf("[WARN] Failed restoring original file for doc %d: %v", item.PK, err)
+			}
 
 			srcArch := filepath.Join(sourceDir, "archive", fmt.Sprintf("%07d.pdf", item.PK))
 			destArch := filepath.Join(cfg.MediaDir, "documents", "archive", fmt.Sprintf("%07d.pdf", item.PK))
@@ -513,31 +528,44 @@ func Import(db *database.DB, cfg *config.Config, sourceDir string) error {
 			destThumb := filepath.Join(cfg.MediaDir, "documents", "thumbnails", fmt.Sprintf("%07d.png", item.PK))
 			_ = copyFile(srcThumb, destThumb)
 
-			_, _ = db.Exec(`
-				INSERT INTO documents (
-					id, title, content, original_filename, checksum, mime_type, page_count,
-					correspondent_id, document_type_id, storage_path_id, archive_serial_number, owner_id,
-					created, modified, added
-				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-				ON CONFLICT(id) DO UPDATE SET
-					title = excluded.title,
-					content = excluded.content,
-					correspondent_id = excluded.correspondent_id,
-					document_type_id = excluded.document_type_id,
-					storage_path_id = excluded.storage_path_id,
-					archive_serial_number = excluded.archive_serial_number,
-					owner_id = excluded.owner_id
-			`, item.PK, title, content, origName, checksum, mimeType, pageCount, corrID, docTypeID, storPathID, asn, ownerID, createdTime)
+			// Atomic document persistence with tags and FTS index
+			docTxErr := db.WithTx(context.Background(), func(tx *sql.Tx) error {
+				if _, err := tx.Exec(`
+					INSERT INTO documents (
+						id, title, content, original_filename, checksum, mime_type, page_count,
+						correspondent_id, document_type_id, storage_path_id, archive_serial_number, owner_id,
+						created, modified, added
+					)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+					ON CONFLICT(id) DO UPDATE SET
+						title = excluded.title,
+						content = excluded.content,
+						correspondent_id = excluded.correspondent_id,
+						document_type_id = excluded.document_type_id,
+						storage_path_id = excluded.storage_path_id,
+						archive_serial_number = excluded.archive_serial_number,
+						owner_id = excluded.owner_id
+				`, item.PK, title, content, origName, checksum, mimeType, pageCount, corrID, docTypeID, storPathID, asn, ownerID, createdTime); err != nil {
+					return fmt.Errorf("failed inserting document %d: %w", item.PK, err)
+				}
 
-			_, _ = db.Exec("INSERT OR REPLACE INTO documents_fts (rowid, title, content) VALUES (?, ?, ?)", item.PK, title, content)
+				if _, err := tx.Exec("INSERT OR REPLACE INTO documents_fts (rowid, title, content) VALUES (?, ?, ?)", item.PK, title, content); err != nil {
+					return fmt.Errorf("failed inserting fts index for doc %d: %w", item.PK, err)
+				}
 
-			if tagList, ok := item.Fields["tags"].([]interface{}); ok {
-				for _, tidVal := range tagList {
-					if tid, ok := tidVal.(float64); ok {
-						_, _ = db.Exec("INSERT OR IGNORE INTO document_tags (document_id, tag_id) VALUES (?, ?)", item.PK, int(tid))
+				if tagList, ok := item.Fields["tags"].([]interface{}); ok {
+					for _, tidVal := range tagList {
+						if tid, ok := tidVal.(float64); ok {
+							if _, err := tx.Exec("INSERT OR IGNORE INTO document_tags (document_id, tag_id) VALUES (?, ?)", item.PK, int(tid)); err != nil {
+								return fmt.Errorf("failed inserting tag %d for doc %d: %w", int(tid), item.PK, err)
+							}
+						}
 					}
 				}
+				return nil
+			})
+			if docTxErr != nil {
+				log.Printf("[ERROR] Exporter transaction failed for document %d: %v", item.PK, docTxErr)
 			}
 		}
 	}
@@ -573,10 +601,15 @@ func SanityCheck(db *database.DB, cfg *config.Config) ([]string, error) {
 			}
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sanity check document cursor error: %w", err)
+	}
 
 	// 2. Check for orphaned tags in document_tags
 	var orphanTags int
-	_ = db.QueryRow("SELECT COUNT(*) FROM document_tags WHERE tag_id NOT IN (SELECT id FROM tags)").Scan(&orphanTags)
+	if err := db.QueryRow("SELECT COUNT(*) FROM document_tags WHERE tag_id NOT IN (SELECT id FROM tags)").Scan(&orphanTags); err != nil {
+		log.Printf("[WARN] Failed checking orphaned tags in sanity check: %v", err)
+	}
 	if orphanTags > 0 {
 		issues = append(issues, fmt.Sprintf("Found %d orphaned document_tags references with non-existent tag_id", orphanTags))
 	}

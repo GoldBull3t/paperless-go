@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"paperless-go/internal/config"
@@ -13,13 +14,13 @@ import (
 	"paperless-go/internal/queue"
 )
 
-// MailFetcher periodically polls configured IMAP accounts and processes documents
 type MailFetcher struct {
 	db       *database.DB
 	cfg      *config.Config
 	consumer *Consumer
 	queue    *queue.Queue
 	stopChan chan struct{}
+	wg       sync.WaitGroup
 }
 
 func NewMailFetcher(db *database.DB, cfg *config.Config, c *Consumer, q *queue.Queue) *MailFetcher {
@@ -34,13 +35,18 @@ func NewMailFetcher(db *database.DB, cfg *config.Config, c *Consumer, q *queue.Q
 
 // Start begins periodic polling in background
 func (mf *MailFetcher) Start() {
+	mf.wg.Add(1)
 	go func() {
+		defer mf.wg.Done()
 		ticker := time.NewTicker(2 * time.Minute)
 		defer ticker.Stop()
+
 		for {
 			select {
 			case <-ticker.C:
-				_ = mf.PollOnce()
+				if err := mf.PollOnce(); err != nil {
+					log.Printf("[WARN] MailFetcher periodic check encountered error: %v", err)
+				}
 			case <-mf.stopChan:
 				return
 			}
@@ -48,16 +54,22 @@ func (mf *MailFetcher) Start() {
 	}()
 }
 
-// Stop stops the background mail fetcher
+// Stop stops the background mail fetcher and waits for ongoing iteration to exit
 func (mf *MailFetcher) Stop() {
-	close(mf.stopChan)
+	select {
+	case <-mf.stopChan:
+		// already closed
+	default:
+		close(mf.stopChan)
+	}
+	mf.wg.Wait()
 }
 
 // PollOnce inspects all active mail accounts and checks for messages
 func (mf *MailFetcher) PollOnce() error {
 	rows, err := mf.db.Query("SELECT id, name, imap_server, username FROM mail_accounts")
 	if err != nil {
-		return err
+		return fmt.Errorf("failed querying mail accounts: %w", err)
 	}
 	defer rows.Close()
 
@@ -76,9 +88,12 @@ func (mf *MailFetcher) PollOnce() error {
 						_ = ruleName
 					}
 				}
-				ruleRows.Close()
+				_ = ruleRows.Close()
 			}
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("cursor error iterating mail accounts: %w", err)
 	}
 	return nil
 }
@@ -106,10 +121,12 @@ func (mf *MailFetcher) IngestEmailFile(accountID int, emlPath, subject string, o
 
 	// Record in processed_mail
 	uid := fmt.Sprintf("mail-%d-%d", accountID, time.Now().UnixNano())
-	_, _ = mf.db.Exec(`
+	if _, err := mf.db.Exec(`
 		INSERT INTO processed_mail (account_id, folder, uid, subject, status, error, received, processed, owner_id)
 		VALUES (?, 'INBOX', ?, ?, 'SUCCESS', '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
-	`, accountID, uid, cleanSubject, ownerID)
+	`, accountID, uid, cleanSubject, ownerID); err != nil {
+		log.Printf("[ERROR] Failed recording processed mail for doc %d: %v", docID, err)
+	}
 
 	_ = data
 	return docID, nil

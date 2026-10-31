@@ -1,6 +1,8 @@
 package queue
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"strconv"
 	"sync"
@@ -28,17 +30,27 @@ type Queue struct {
 	taskChan    chan TaskPayload
 	broadcaster Broadcaster
 	wg          sync.WaitGroup
-	quit        chan struct{}
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
 func NewQueue(db *database.DB, workerCount int) *Queue {
+	return NewQueueWithContext(context.Background(), db, workerCount)
+}
+
+func NewQueueWithContext(parentCtx context.Context, db *database.DB, workerCount int) *Queue {
 	// Clean up any previously interrupted tasks
-	_, _ = db.Exec("UPDATE tasks SET status = 'FAILURE', result = 'Interrupted by server restart', date_done = CURRENT_TIMESTAMP WHERE status IN ('PENDING', 'STARTED')")
+	if _, err := db.Exec("UPDATE tasks SET status = 'FAILURE', result = 'Interrupted by server restart', date_done = CURRENT_TIMESTAMP WHERE status IN ('PENDING', 'STARTED')"); err != nil {
+		log.Printf("[WARN] Failed cleaning up interrupted tasks on startup: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(parentCtx)
 
 	q := &Queue{
 		db:       db,
 		taskChan: make(chan TaskPayload, 100),
-		quit:     make(chan struct{}),
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 
 	for i := 0; i < workerCount; i++ {
@@ -61,7 +73,7 @@ func (q *Queue) Enqueue(taskName, fileName, filePath string, exec func(taskID st
 		VALUES (?, 'file_handling', 'PENDING', ?, ?, CURRENT_TIMESTAMP)
 	`, taskID, taskName, fileName)
 	if err != nil {
-		log.Printf("Error creating task in DB: %v", err)
+		log.Printf("[ERROR] Failed creating task %s in DB: %v", taskID, err)
 	}
 
 	task := models.Task{
@@ -76,12 +88,16 @@ func (q *Queue) Enqueue(taskName, fileName, filePath string, exec func(taskID st
 		q.broadcaster.BroadcastTaskUpdate(task)
 	}
 
-	q.taskChan <- TaskPayload{
+	select {
+	case q.taskChan <- TaskPayload{
 		TaskID:       taskID,
 		TaskName:     taskName,
 		TaskFileName: fileName,
 		FilePath:     filePath,
 		Execute:      exec,
+	}:
+	case <-q.ctx.Done():
+		log.Printf("[WARN] Queue is shutting down; task %s dropped from memory channel", taskID)
 	}
 
 	return taskID
@@ -93,7 +109,7 @@ func (q *Queue) worker(id int) {
 		select {
 		case payload := <-q.taskChan:
 			q.processTask(payload)
-		case <-q.quit:
+		case <-q.ctx.Done():
 			return
 		}
 	}
@@ -103,7 +119,9 @@ func (q *Queue) processTask(p TaskPayload) {
 	log.Printf("[Queue] Starting task %s (%s)", p.TaskID, p.TaskFileName)
 
 	// Update to STARTED
-	_, _ = q.db.Exec(`UPDATE tasks SET status = 'STARTED' WHERE task_id = ?`, p.TaskID)
+	if _, err := q.db.Exec(`UPDATE tasks SET status = 'STARTED' WHERE task_id = ?`, p.TaskID); err != nil {
+		log.Printf("[ERROR] Failed updating task %s to STARTED: %v", p.TaskID, err)
+	}
 	if q.broadcaster != nil {
 		q.broadcaster.BroadcastTaskUpdate(models.Task{
 			TaskID:       p.TaskID,
@@ -114,7 +132,36 @@ func (q *Queue) processTask(p TaskPayload) {
 		})
 	}
 
-	docID, err := p.Execute(p.TaskID)
+	// Run task with dedicated timeout context
+	taskCtx, taskCancel := context.WithTimeout(q.ctx, 15*time.Minute)
+	defer taskCancel()
+
+	type taskResult struct {
+		docID int
+		err   error
+	}
+	resChan := make(chan taskResult, 1)
+
+	go func() {
+		docID, err := p.Execute(p.TaskID)
+		resChan <- taskResult{docID: docID, err: err}
+	}()
+
+	var docID int
+	var err error
+
+	select {
+	case res := <-resChan:
+		docID = res.docID
+		err = res.err
+	case <-taskCtx.Done():
+		if q.ctx.Err() != nil {
+			err = fmt.Errorf("task canceled: server shutdown")
+		} else {
+			err = fmt.Errorf("task timeout: execution exceeded 15 minutes limit")
+		}
+	}
+
 	now := time.Now()
 
 	if err != nil {
@@ -122,9 +169,11 @@ func (q *Queue) processTask(p TaskPayload) {
 		errMsg := err.Error()
 		if docID > 0 {
 			docIDStr := strconv.Itoa(docID)
-			_, _ = q.db.Exec(`
+			if _, dbErr := q.db.Exec(`
 				UPDATE tasks SET status = 'FAILURE', result = ?, date_done = CURRENT_TIMESTAMP, related_document_id = ? WHERE task_id = ?
-			`, errMsg, docID, p.TaskID)
+			`, errMsg, docID, p.TaskID); dbErr != nil {
+				log.Printf("[ERROR] Failed updating failed task %s in DB: %v", p.TaskID, dbErr)
+			}
 			if q.broadcaster != nil {
 				q.broadcaster.BroadcastTaskUpdate(models.Task{
 					TaskID:             p.TaskID,
@@ -139,9 +188,11 @@ func (q *Queue) processTask(p TaskPayload) {
 				})
 			}
 		} else {
-			_, _ = q.db.Exec(`
+			if _, dbErr := q.db.Exec(`
 				UPDATE tasks SET status = 'FAILURE', result = ?, date_done = CURRENT_TIMESTAMP WHERE task_id = ?
-			`, errMsg, p.TaskID)
+			`, errMsg, p.TaskID); dbErr != nil {
+				log.Printf("[ERROR] Failed updating failed task %s in DB: %v", p.TaskID, dbErr)
+			}
 			if q.broadcaster != nil {
 				q.broadcaster.BroadcastTaskUpdate(models.Task{
 					TaskID:       p.TaskID,
@@ -157,9 +208,11 @@ func (q *Queue) processTask(p TaskPayload) {
 	} else {
 		log.Printf("[Queue] Task %s completed successfully. Document ID: %d", p.TaskID, docID)
 		resMsg := "Success. New document added."
-		_, _ = q.db.Exec(`
+		if _, dbErr := q.db.Exec(`
 			UPDATE tasks SET status = 'SUCCESS', result = ?, date_done = CURRENT_TIMESTAMP, related_document_id = ? WHERE task_id = ?
-		`, resMsg, docID, p.TaskID)
+		`, resMsg, docID, p.TaskID); dbErr != nil {
+			log.Printf("[ERROR] Failed updating successful task %s in DB: %v", p.TaskID, dbErr)
+		}
 		if q.broadcaster != nil {
 			docIDStr := strconv.Itoa(docID)
 			q.broadcaster.BroadcastTaskUpdate(models.Task{
@@ -180,6 +233,6 @@ func (q *Queue) processTask(p TaskPayload) {
 }
 
 func (q *Queue) Close() {
-	close(q.quit)
+	q.cancel()
 	q.wg.Wait()
 }

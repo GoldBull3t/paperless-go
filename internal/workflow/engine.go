@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -175,10 +176,12 @@ func (e *Engine) ExecuteWorkflows(doc *models.Document, triggerType int, source 
 						subject = "Document: " + doc.Title
 					}
 					log.Printf("[Workflow] Email action triggered: to=%s, subject=%s, docID=%d", to, subject, doc.ID)
-					_, _ = e.db.Exec(`
+					if _, err := e.db.Exec(`
 						INSERT INTO processed_mail (account_id, folder, uid, subject, status, error, received, processed)
 						VALUES (1, 'SENT', ?, ?, 'SUCCESS', '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-					`, fmt.Sprintf("doc-%d", doc.ID), subject)
+					`, fmt.Sprintf("doc-%d", doc.ID), subject); err != nil {
+						log.Printf("[ERROR] [Workflow] Failed recording email action for doc %d: %v", doc.ID, err)
+					}
 				}
 
 			case ActionPasswordRemoval:
@@ -187,16 +190,31 @@ func (e *Engine) ExecuteWorkflows(doc *models.Document, triggerType int, source 
 			case ActionWebhook:
 				if hookUrl, ok := action["webhook_url"].(string); ok && hookUrl != "" {
 					go func(url string, d *models.Document) {
-						payload, _ := json.Marshal(d)
-						req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
-						if err == nil {
-							req.Header.Set("Content-Type", "application/json")
-							req.Header.Set("User-Agent", "paperless-go-workflow/1.0")
-							client := &http.Client{Timeout: 10 * time.Second}
-							resp, err := client.Do(req)
-							if err == nil {
-								_ = resp.Body.Close()
-							}
+						ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+						defer cancel()
+
+						payload, err := json.Marshal(d)
+						if err != nil {
+							log.Printf("[ERROR] [Workflow] Failed marshaling document for webhook %s: %v", url, err)
+							return
+						}
+						req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(payload))
+						if err != nil {
+							log.Printf("[ERROR] [Workflow] Failed creating webhook request for %s: %v", url, err)
+							return
+						}
+						req.Header.Set("Content-Type", "application/json")
+						req.Header.Set("User-Agent", "paperless-go-workflow/1.0")
+
+						client := &http.Client{}
+						resp, err := client.Do(req)
+						if err != nil {
+							log.Printf("[WARN] [Workflow] Webhook request to %s failed: %v", url, err)
+							return
+						}
+						defer resp.Body.Close()
+						if resp.StatusCode >= 400 {
+							log.Printf("[WARN] [Workflow] Webhook to %s returned HTTP status %d", url, resp.StatusCode)
 						}
 					}(hookUrl, doc)
 				}
@@ -208,11 +226,13 @@ func (e *Engine) ExecuteWorkflows(doc *models.Document, triggerType int, source 
 	}
 
 	if docUpdated && doc.ID > 0 {
-		_, _ = e.db.Exec(`
+		if _, err := e.db.Exec(`
 			UPDATE documents
 			SET title = ?, correspondent_id = ?, document_type_id = ?, storage_path_id = ?, owner_id = ?, modified = CURRENT_TIMESTAMP
 			WHERE id = ?
-		`, doc.Title, doc.Correspondent, doc.DocumentType, doc.StoragePath, doc.Owner, doc.ID)
+		`, doc.Title, doc.Correspondent, doc.DocumentType, doc.StoragePath, doc.Owner, doc.ID); err != nil {
+			log.Printf("[ERROR] [Workflow] Failed updating document %d: %v", doc.ID, err)
+		}
 	}
 
 	return nil

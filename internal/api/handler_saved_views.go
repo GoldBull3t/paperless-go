@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -56,7 +57,9 @@ func (h *SavedViewsHandler) List(w http.ResponseWriter, r *http.Request) {
 				sv.Owner = &o
 			}
 			sv.UserCanChange = (user == nil || user.IsSuperuser || sv.Owner == nil || *sv.Owner == user.ID)
-			_ = json.Unmarshal([]byte(rulesJSON), &sv.FilterRules)
+			if err := json.Unmarshal([]byte(rulesJSON), &sv.FilterRules); err != nil {
+				log.Printf("[WARN] invalid rulesJSON in saved_view %d: %v", sv.ID, err)
+			}
 			if sv.FilterRules == nil {
 				sv.FilterRules = []models.SavedViewFilterRule{}
 			}
@@ -161,7 +164,9 @@ func (h *SavedViewsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 	sv.UserCanChange = (user == nil || user.IsSuperuser || sv.Owner == nil || *sv.Owner == user.ID)
 
-	_ = json.Unmarshal([]byte(rulesJSON), &sv.FilterRules)
+	if err := json.Unmarshal([]byte(rulesJSON), &sv.FilterRules); err != nil {
+		log.Printf("[WARN] invalid rulesJSON in saved_view %d: %v", sv.ID, err)
+	}
 	if sv.FilterRules == nil {
 		sv.FilterRules = []models.SavedViewFilterRule{}
 	}

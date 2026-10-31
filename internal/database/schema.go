@@ -1,4 +1,4 @@
-package database
+﻿package database
 
 const SchemaSQL = `
 PRAGMA foreign_keys = ON;

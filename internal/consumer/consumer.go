@@ -14,6 +14,7 @@ import (
 
 	"context"
 	"encoding/json"
+	"log"
 
 	"paperless-go/internal/ai"
 	"paperless-go/internal/classifier"
@@ -338,10 +339,12 @@ func (c *Consumer) ConsumeFile(srcPath, originalFileName string, opts *ConsumeOp
 		_ = c.wfEngine.ExecuteWorkflows(docObj, workflow.TriggerDocumentAdded, workflow.SourceConsumeFolder)
 	}
 
-	// Asynchronously update vector classifier model
+	// Asynchronously update vector classifier model with timeout and error handling
 	if c.clf != nil {
 		go func() {
-			_ = c.clf.Train()
+			if err := c.clf.Train(); err != nil {
+				log.Printf("[WARN] Classifier background training failed: %v", err)
+			}
 		}()
 	}
 
@@ -355,10 +358,12 @@ func (c *Consumer) ConsumeFile(srcPath, originalFileName string, opts *ConsumeOp
 			embs, err := c.aiProvider.Embed(ctx, []string{docTitle + " " + docContent})
 			if err == nil && len(embs) > 0 {
 				if embJSON, err := ai.EncodeEmbedding(embs[0]); err == nil {
-					_, _ = c.db.Exec(`
+					if _, err := c.db.Exec(`
 						INSERT OR REPLACE INTO document_embeddings (document_id, embedding_json, model, updated_at)
 						VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-					`, id, embJSON, c.cfg.AIEmbeddingModel)
+					`, id, embJSON, c.cfg.AIEmbeddingModel); err != nil {
+						log.Printf("[ERROR] Failed saving embeddings for doc %d: %v", id, err)
+					}
 				}
 			}
 
@@ -366,8 +371,12 @@ func (c *Consumer) ConsumeFile(srcPath, originalFileName string, opts *ConsumeOp
 			if c.extractor != nil && c.cfg.AIExtractOnConsume {
 				meta, err := c.extractor.ExtractMetadata(ctx, docTitle, docContent)
 				if err == nil && meta != nil {
-					metaJSON, _ := json.Marshal(meta)
-					_, _ = c.db.Exec("UPDATE documents SET extracted_metadata_json = ? WHERE id = ?", string(metaJSON), id)
+					metaJSON, err := json.Marshal(meta)
+					if err == nil {
+						if _, err := c.db.Exec("UPDATE documents SET extracted_metadata_json = ? WHERE id = ?", string(metaJSON), id); err != nil {
+							log.Printf("[ERROR] Failed updating extracted metadata for doc %d: %v", id, err)
+						}
+					}
 				}
 			}
 		}(docID, title, content)
@@ -381,13 +390,17 @@ func (c *Consumer) ConsumeFile(srcPath, originalFileName string, opts *ConsumeOp
 	if strings.Contains(mimeType, "pdf") {
 		archiveFileName := fmt.Sprintf("%07d.pdf", docID)
 		if GenerateArchivePDF(destPath, archivePath) {
-			_, _ = c.db.Exec("UPDATE documents SET archive_filename = ? WHERE id = ?", archiveFileName, docID)
+			if _, err := c.db.Exec("UPDATE documents SET archive_filename = ? WHERE id = ?", archiveFileName, docID); err != nil {
+				log.Printf("[ERROR] Failed updating archive_filename for doc %d: %v", docID, err)
+			}
 			archiveGenerated = true
 		}
 	} else if IsOfficeDocument(destPath, mimeType) {
 		archiveFileName := fmt.Sprintf("%07d.pdf", docID)
 		if ConvertOfficeToPDF(destPath, archivePath) {
-			_, _ = c.db.Exec("UPDATE documents SET archive_filename = ? WHERE id = ?", archiveFileName, docID)
+			if _, err := c.db.Exec("UPDATE documents SET archive_filename = ? WHERE id = ?", archiveFileName, docID); err != nil {
+				log.Printf("[ERROR] Failed updating archive_filename for doc %d: %v", docID, err)
+			}
 			archiveGenerated = true
 		}
 	}
@@ -422,7 +435,9 @@ func (c *Consumer) matchTags(content, title string, matchedTags map[int]bool) {
 			}
 		}
 	}
-	_ = rows.Err()
+	if err := rows.Err(); err != nil {
+		log.Printf("[WARN] matchRules tags cursor error: %v", err)
+	}
 }
 
 func (c *Consumer) matchCorrespondent(content, title string) *int {
@@ -442,7 +457,9 @@ func (c *Consumer) matchCorrespondent(content, title string) *int {
 			}
 		}
 	}
-	_ = rows.Err()
+	if err := rows.Err(); err != nil {
+		log.Printf("[WARN] matchCorrespondent cursor error: %v", err)
+	}
 	return nil
 }
 
@@ -463,7 +480,9 @@ func (c *Consumer) matchDocumentType(content, title string) *int {
 			}
 		}
 	}
-	_ = rows.Err()
+	if err := rows.Err(); err != nil {
+		log.Printf("[WARN] matchDocumentType cursor error: %v", err)
+	}
 	return nil
 }
 
@@ -484,7 +503,9 @@ func (c *Consumer) matchStoragePath(content, title string) *int {
 			}
 		}
 	}
-	_ = rows.Err()
+	if err := rows.Err(); err != nil {
+		log.Printf("[WARN] matchStoragePath cursor error: %v", err)
+	}
 	return nil
 }
 

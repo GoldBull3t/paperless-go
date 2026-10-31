@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"paperless-go/internal/queue"
@@ -16,6 +17,7 @@ type Watcher struct {
 	consumer   *Consumer
 	queue      *queue.Queue
 	quit       chan struct{}
+	wg         sync.WaitGroup
 }
 
 func NewWatcher(consumeDir string, c *Consumer, q *queue.Queue) *Watcher {
@@ -28,14 +30,17 @@ func NewWatcher(consumeDir string, c *Consumer, q *queue.Queue) *Watcher {
 }
 
 func (w *Watcher) Start() {
-	ticker := time.NewTicker(5 * time.Second)
+	w.wg.Add(1)
 	go func() {
+		defer w.wg.Done()
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
 		for {
 			select {
 			case <-ticker.C:
 				w.scanConsumeDir()
 			case <-w.quit:
-				ticker.Stop()
 				return
 			}
 		}
@@ -44,16 +49,31 @@ func (w *Watcher) Start() {
 }
 
 func (w *Watcher) Stop() {
-	close(w.quit)
+	select {
+	case <-w.quit:
+		// already closed
+	default:
+		close(w.quit)
+	}
+	w.wg.Wait()
 }
 
 func (w *Watcher) scanConsumeDir() {
 	entries, err := os.ReadDir(w.consumeDir)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("[WARN] Watcher unable to read consume directory %s: %v", w.consumeDir, err)
+		}
 		return
 	}
 
 	for _, entry := range entries {
+		select {
+		case <-w.quit:
+			return
+		default:
+		}
+
 		if entry.IsDir() || stringsHasPrefix(entry.Name(), ".") {
 			continue
 		}
@@ -67,7 +87,13 @@ func (w *Watcher) scanConsumeDir() {
 		// Ensure file has finished being written by checking size and mod time stability
 		initialSize := info1.Size()
 		initialMod := info1.ModTime()
-		time.Sleep(500 * time.Millisecond)
+
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-w.quit:
+			return
+		}
+
 		info2, err := os.Stat(filePath)
 		if err != nil || info2.Size() != initialSize || !info2.ModTime().Equal(initialMod) {
 			// File is still being actively written, will pick it up on next tick
@@ -78,11 +104,14 @@ func (w *Watcher) scanConsumeDir() {
 		// Create a copy in temp folder for consumer to process safely
 		tmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("paperless-consume-%d-%s", time.Now().UnixNano(), fileName))
 		if err := copyFile(filePath, tmpPath); err != nil {
+			log.Printf("[WARN] Watcher failed copying consume file %s: %v", fileName, err)
 			continue
 		}
 
 		// Remove from consume folder now that safe temporary copy is secured
-		_ = os.Remove(filePath)
+		if err := os.Remove(filePath); err != nil {
+			log.Printf("[WARN] Watcher failed removing original consumed file %s: %v", fileName, err)
+		}
 		log.Printf("[Watcher] Queued drop-in document: %s", fileName)
 
 		w.queue.Enqueue("Consume document", fileName, tmpPath, func(tid string) (int, error) {

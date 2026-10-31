@@ -1,4 +1,4 @@
-package compress
+﻿package compress
 
 import (
 	"encoding/base64"

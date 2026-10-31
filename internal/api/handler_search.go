@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -210,14 +211,18 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 						sv.Owner = &o
 					}
 					sv.UserCanChange = (user == nil || user.IsSuperuser || sv.Owner == nil || *sv.Owner == user.ID)
-					_ = json.Unmarshal([]byte(rulesJSON), &sv.FilterRules)
+					if err := json.Unmarshal([]byte(rulesJSON), &sv.FilterRules); err != nil {
+						log.Printf("[WARN] search invalid rulesJSON for saved_view %d: %v", sv.ID, err)
+					}
 					if sv.FilterRules == nil {
 						sv.FilterRules = []models.SavedViewFilterRule{}
 					}
 					views = append(views, sv)
 				}
 			}
-			_ = rows.Err()
+			if err := rows.Err(); err != nil {
+				log.Printf("[WARN] search saved_views cursor error: %v", err)
+			}
 		}
 	}
 	if views == nil {
@@ -246,7 +251,9 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 					tags = append(tags, t)
 				}
 			}
-			_ = rows.Err()
+			if err := rows.Err(); err != nil {
+				log.Printf("[WARN] search tags cursor error: %v", err)
+			}
 		}
 	}
 	if tags == nil {
@@ -275,7 +282,9 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 					corrs = append(corrs, c)
 				}
 			}
-			_ = rows.Err()
+			if err := rows.Err(); err != nil {
+				log.Printf("[WARN] search correspondents cursor error: %v", err)
+			}
 		}
 	}
 	if corrs == nil {
@@ -304,7 +313,9 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 					dts = append(dts, dt)
 				}
 			}
-			_ = rows.Err()
+			if err := rows.Err(); err != nil {
+				log.Printf("[WARN] search document_types cursor error: %v", err)
+			}
 		}
 	}
 	if dts == nil {
@@ -324,18 +335,24 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 				var wf models.Workflow
 				var trigsJSON, actsJSON string
 				if err := rows.Scan(&wf.ID, &wf.Name, &wf.Order, &wf.Enabled, &trigsJSON, &actsJSON); err == nil {
-					_ = json.Unmarshal([]byte(trigsJSON), &wf.Triggers)
+					if err := json.Unmarshal([]byte(trigsJSON), &wf.Triggers); err != nil {
+						log.Printf("[WARN] search invalid triggersJSON for workflow %d: %v", wf.ID, err)
+					}
 					if wf.Triggers == nil {
 						wf.Triggers = []map[string]interface{}{}
 					}
-					_ = json.Unmarshal([]byte(actsJSON), &wf.Actions)
+					if err := json.Unmarshal([]byte(actsJSON), &wf.Actions); err != nil {
+						log.Printf("[WARN] search invalid actionsJSON for workflow %d: %v", wf.ID, err)
+					}
 					if wf.Actions == nil {
 						wf.Actions = []map[string]interface{}{}
 					}
 					wfs = append(wfs, wf)
 				}
 			}
-			_ = rows.Err()
+			if err := rows.Err(); err != nil {
+				log.Printf("[WARN] search workflows cursor error: %v", err)
+			}
 		}
 	}
 	if wfs == nil {
@@ -364,7 +381,9 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 					storPaths = append(storPaths, sp)
 				}
 			}
-			_ = rows.Err()
+			if err := rows.Err(); err != nil {
+				log.Printf("[WARN] search storage_paths cursor error: %v", err)
+			}
 		}
 	}
 	if storPaths == nil {
@@ -383,14 +402,18 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 				var cf models.CustomField
 				var extra string
 				if err := rows.Scan(&cf.ID, &cf.Name, &cf.DataType, &extra); err == nil {
-					_ = json.Unmarshal([]byte(extra), &cf.ExtraData)
+					if err := json.Unmarshal([]byte(extra), &cf.ExtraData); err != nil {
+						log.Printf("[WARN] search invalid extra_data for custom_field %d: %v", cf.ID, err)
+					}
 					if cf.ExtraData == nil {
 						cf.ExtraData = make(map[string]interface{})
 					}
 					customFields = append(customFields, cf)
 				}
 			}
-			_ = rows.Err()
+			if err := rows.Err(); err != nil {
+				log.Printf("[WARN] search custom_fields cursor error: %v", err)
+			}
 		}
 	}
 	if customFields == nil {
@@ -412,7 +435,9 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 					usersList = append(usersList, u)
 				}
 			}
-			_ = rows.Err()
+			if err := rows.Err(); err != nil {
+				log.Printf("[WARN] search users cursor error: %v", err)
+			}
 		}
 	}
 	if usersList == nil {
@@ -467,7 +492,9 @@ func (h *SearchHandler) Autocomplete(w http.ResponseWriter, r *http.Request) {
 					suggestions = append(suggestions, t)
 				}
 			}
-			_ = rows.Err()
+			if err := rows.Err(); err != nil {
+				log.Printf("[WARN] autocomplete title cursor error: %v", err)
+			}
 		}
 
 		tagOwnerFilter := ""
@@ -487,7 +514,9 @@ func (h *SearchHandler) Autocomplete(w http.ResponseWriter, r *http.Request) {
 					suggestions = append(suggestions, name)
 				}
 			}
-			_ = rowsT.Err()
+			if err := rowsT.Err(); err != nil {
+				log.Printf("[WARN] autocomplete tags cursor error: %v", err)
+			}
 		}
 
 		rowsC, err := h.db.Query(fmt.Sprintf(`SELECT name FROM correspondents WHERE name LIKE ?%s LIMIT 3`, tagOwnerFilter), tagArgs...)
@@ -499,7 +528,9 @@ func (h *SearchHandler) Autocomplete(w http.ResponseWriter, r *http.Request) {
 					suggestions = append(suggestions, name)
 				}
 			}
-			_ = rowsC.Err()
+			if err := rowsC.Err(); err != nil {
+				log.Printf("[WARN] autocomplete correspondents cursor error: %v", err)
+			}
 		}
 
 		rowsD, err := h.db.Query(fmt.Sprintf(`SELECT name FROM document_types WHERE name LIKE ?%s LIMIT 3`, tagOwnerFilter), tagArgs...)
@@ -511,7 +542,9 @@ func (h *SearchHandler) Autocomplete(w http.ResponseWriter, r *http.Request) {
 					suggestions = append(suggestions, name)
 				}
 			}
-			_ = rowsD.Err()
+			if err := rowsD.Err(); err != nil {
+				log.Printf("[WARN] autocomplete document_types cursor error: %v", err)
+			}
 		}
 
 		// Terms from indexed document content

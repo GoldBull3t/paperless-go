@@ -1,6 +1,7 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -318,12 +319,23 @@ func (h *UsersHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, _ = h.db.Exec("DELETE FROM user_groups WHERE user_id = ?", id)
-	_, _ = h.db.Exec("DELETE FROM user_permissions WHERE user_id = ?", id)
-	_, _ = h.db.Exec("DELETE FROM ui_settings WHERE user_id = ?", id)
-	_, err := h.db.Exec("DELETE FROM users WHERE id = ?", id)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	txErr := h.db.WithTx(r.Context(), func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(r.Context(), "DELETE FROM user_groups WHERE user_id = ?", id); err != nil {
+			return fmt.Errorf("failed deleting user_groups: %w", err)
+		}
+		if _, err := tx.ExecContext(r.Context(), "DELETE FROM user_permissions WHERE user_id = ?", id); err != nil {
+			return fmt.Errorf("failed deleting user_permissions: %w", err)
+		}
+		if _, err := tx.ExecContext(r.Context(), "DELETE FROM ui_settings WHERE user_id = ?", id); err != nil {
+			return fmt.Errorf("failed deleting ui_settings: %w", err)
+		}
+		if _, err := tx.ExecContext(r.Context(), "DELETE FROM users WHERE id = ?", id); err != nil {
+			return fmt.Errorf("failed deleting user: %w", err)
+		}
+		return nil
+	})
+	if txErr != nil {
+		http.Error(w, txErr.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -349,7 +361,10 @@ func (h *UsersHandler) ListGroups(w http.ResponseWriter, r *http.Request) {
 			allIDs = append(allIDs, g.ID)
 		}
 	}
-	_ = rows.Err()
+	if err := rows.Err(); err != nil {
+		http.Error(w, fmt.Sprintf("cursor error fetching groups: %v", err), http.StatusInternalServerError)
+		return
+	}
 
 	if results == nil {
 		results = []models.Group{}
@@ -460,9 +475,22 @@ func (h *UsersHandler) DeleteGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, _ = h.db.Exec("DELETE FROM user_groups WHERE group_id = ?", id)
-	_, _ = h.db.Exec("DELETE FROM group_permissions WHERE group_id = ?", id)
-	_, _ = h.db.Exec("DELETE FROM groups WHERE id = ?", id)
+	txErr := h.db.WithTx(r.Context(), func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(r.Context(), "DELETE FROM user_groups WHERE group_id = ?", id); err != nil {
+			return fmt.Errorf("failed deleting user_groups for group %d: %w", id, err)
+		}
+		if _, err := tx.ExecContext(r.Context(), "DELETE FROM group_permissions WHERE group_id = ?", id); err != nil {
+			return fmt.Errorf("failed deleting group_permissions for group %d: %w", id, err)
+		}
+		if _, err := tx.ExecContext(r.Context(), "DELETE FROM groups WHERE id = ?", id); err != nil {
+			return fmt.Errorf("failed deleting group %d: %w", id, err)
+		}
+		return nil
+	})
+	if txErr != nil {
+		http.Error(w, txErr.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }

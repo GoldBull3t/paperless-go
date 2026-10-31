@@ -2,6 +2,7 @@ package classifier
 
 import (
 	"database/sql"
+	"fmt"
 	"math"
 	"strings"
 	"sync"
@@ -206,7 +207,10 @@ func (c *Classifier) Train() error {
 			docs = append(docs, rec)
 		}
 	}
-	_ = rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("classifier docs query cursor error: %w", err)
+	}
 	rows.Close()
 
 	// Load document tags
@@ -219,7 +223,10 @@ func (c *Classifier) Train() error {
 					docs[i].tags = append(docs[i].tags, tid)
 				}
 			}
-			_ = tagRows.Err()
+			if err := tagRows.Err(); err != nil {
+				tagRows.Close()
+				return fmt.Errorf("classifier doc tags cursor error for doc %d: %w", docs[i].id, err)
+			}
 			tagRows.Close()
 		}
 	}

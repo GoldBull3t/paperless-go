@@ -54,7 +54,9 @@ func main() {
 				log.Fatalf("Migration failed: %v", err)
 			}
 			var count int
-			_ = db.QueryRow("SELECT COUNT(*) FROM documents").Scan(&count)
+			if err := db.QueryRow("SELECT COUNT(*) FROM documents").Scan(&count); err != nil {
+				log.Printf("[WARN] Failed counting imported documents: %v", err)
+			}
 			log.Printf("✨ Migration completed successfully! %d document(s) imported and indexed in FTS5.", count)
 			return
 

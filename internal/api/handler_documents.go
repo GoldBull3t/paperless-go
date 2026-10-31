@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -406,7 +407,10 @@ func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
 			allIDs = append(allIDs, id)
 		}
 	}
-	_ = rowsAll.Err()
+	if err := rowsAll.Err(); err != nil {
+		http.Error(w, fmt.Sprintf("cursor error counting documents: %v", err), http.StatusInternalServerError)
+		return
+	}
 	if allIDs == nil {
 		allIDs = []int{}
 	}
@@ -492,7 +496,10 @@ func (h *DocumentsHandler) List(w http.ResponseWriter, r *http.Request) {
 			results = append(results, doc)
 		}
 	}
-	_ = rows.Err()
+	if err := rows.Err(); err != nil {
+		http.Error(w, fmt.Sprintf("cursor error fetching documents: %v", err), http.StatusInternalServerError)
+		return
+	}
 	rows.Close()
 
 	for i := range results {
@@ -647,69 +654,119 @@ func (h *DocumentsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user := GetUserFromContext(r.Context())
-	if input.Owner != nil && (user == nil || user.IsSuperuser || *input.Owner == user.ID) {
-		if *input.Owner == 0 {
-			_, _ = h.db.Exec("UPDATE documents SET owner_id = NULL, modified = CURRENT_TIMESTAMP WHERE id = ?", id)
-		} else {
-			_, _ = h.db.Exec("UPDATE documents SET owner_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *input.Owner, id)
+	txErr := h.db.WithTx(r.Context(), func(tx *sql.Tx) error {
+		if input.Owner != nil && (user == nil || user.IsSuperuser || *input.Owner == user.ID) {
+			if *input.Owner == 0 {
+				if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET owner_id = NULL, modified = CURRENT_TIMESTAMP WHERE id = ?", id); err != nil {
+					return fmt.Errorf("failed to reset owner: %w", err)
+				}
+			} else {
+				if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET owner_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *input.Owner, id); err != nil {
+					return fmt.Errorf("failed to update owner: %w", err)
+				}
+			}
 		}
-	}
 
-	if input.Title != nil {
-		_, _ = h.db.Exec("UPDATE documents SET title = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *input.Title, id)
-		_, _ = h.db.Exec("UPDATE documents_fts SET title = ? WHERE rowid = ?", *input.Title, id)
-	}
-	if input.Correspondent != nil {
-		if *input.Correspondent <= 0 {
-			_, _ = h.db.Exec("UPDATE documents SET correspondent_id = NULL, modified = CURRENT_TIMESTAMP WHERE id = ?", id)
-		} else {
-			_, _ = h.db.Exec("UPDATE documents SET correspondent_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *input.Correspondent, id)
+		if input.Title != nil {
+			if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET title = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *input.Title, id); err != nil {
+				return fmt.Errorf("failed to update title: %w", err)
+			}
+			if _, err := tx.ExecContext(r.Context(), "UPDATE documents_fts SET title = ? WHERE rowid = ?", *input.Title, id); err != nil {
+				return fmt.Errorf("failed to update fts title: %w", err)
+			}
 		}
-	}
-	if input.DocumentType != nil {
-		if *input.DocumentType <= 0 {
-			_, _ = h.db.Exec("UPDATE documents SET document_type_id = NULL, modified = CURRENT_TIMESTAMP WHERE id = ?", id)
-		} else {
-			_, _ = h.db.Exec("UPDATE documents SET document_type_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *input.DocumentType, id)
+		if input.Correspondent != nil {
+			if *input.Correspondent <= 0 {
+				if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET correspondent_id = NULL, modified = CURRENT_TIMESTAMP WHERE id = ?", id); err != nil {
+					return fmt.Errorf("failed to reset correspondent: %w", err)
+				}
+			} else {
+				if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET correspondent_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *input.Correspondent, id); err != nil {
+					return fmt.Errorf("failed to update correspondent: %w", err)
+				}
+			}
 		}
-	}
-	if input.StoragePath != nil {
-		if *input.StoragePath <= 0 {
-			_, _ = h.db.Exec("UPDATE documents SET storage_path_id = NULL, modified = CURRENT_TIMESTAMP WHERE id = ?", id)
-		} else {
-			_, _ = h.db.Exec("UPDATE documents SET storage_path_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *input.StoragePath, id)
+		if input.DocumentType != nil {
+			if *input.DocumentType <= 0 {
+				if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET document_type_id = NULL, modified = CURRENT_TIMESTAMP WHERE id = ?", id); err != nil {
+					return fmt.Errorf("failed to reset document_type: %w", err)
+				}
+			} else {
+				if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET document_type_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *input.DocumentType, id); err != nil {
+					return fmt.Errorf("failed to update document_type: %w", err)
+				}
+			}
 		}
-	}
-	if input.ArchiveSerialNumber != nil {
-		if *input.ArchiveSerialNumber <= 0 {
-			_, _ = h.db.Exec("UPDATE documents SET archive_serial_number = NULL, modified = CURRENT_TIMESTAMP WHERE id = ?", id)
-		} else {
-			_, _ = h.db.Exec("UPDATE documents SET archive_serial_number = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *input.ArchiveSerialNumber, id)
+		if input.StoragePath != nil {
+			if *input.StoragePath <= 0 {
+				if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET storage_path_id = NULL, modified = CURRENT_TIMESTAMP WHERE id = ?", id); err != nil {
+					return fmt.Errorf("failed to reset storage_path: %w", err)
+				}
+			} else {
+				if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET storage_path_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *input.StoragePath, id); err != nil {
+					return fmt.Errorf("failed to update storage_path: %w", err)
+				}
+			}
 		}
-	}
-	if input.CreatedDate != nil {
-		if t, err := time.Parse("2006-01-02", *input.CreatedDate); err == nil {
-			_, _ = h.db.Exec("UPDATE documents SET created = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", t, id)
+		if input.ArchiveSerialNumber != nil {
+			if *input.ArchiveSerialNumber <= 0 {
+				if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET archive_serial_number = NULL, modified = CURRENT_TIMESTAMP WHERE id = ?", id); err != nil {
+					return fmt.Errorf("failed to reset archive_serial_number: %w", err)
+				}
+			} else {
+				if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET archive_serial_number = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *input.ArchiveSerialNumber, id); err != nil {
+					return fmt.Errorf("failed to update archive_serial_number: %w", err)
+				}
+			}
 		}
-	}
+		if input.CreatedDate != nil {
+			if t, err := time.Parse("2006-01-02", *input.CreatedDate); err == nil {
+				if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET created = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", t, id); err != nil {
+					return fmt.Errorf("failed to update created date: %w", err)
+				}
+			}
+		}
 
-	if input.Tags != nil {
-		_, _ = h.db.Exec("DELETE FROM document_tags WHERE document_id = ?", id)
-		for _, tagID := range *input.Tags {
-			_, _ = h.db.Exec("INSERT OR IGNORE INTO document_tags (document_id, tag_id) VALUES (?, ?)", id, tagID)
+		if input.Tags != nil {
+			if _, err := tx.ExecContext(r.Context(), "DELETE FROM document_tags WHERE document_id = ?", id); err != nil {
+				return fmt.Errorf("failed to clear document_tags: %w", err)
+			}
+			for _, tagID := range *input.Tags {
+				if _, err := tx.ExecContext(r.Context(), "INSERT OR IGNORE INTO document_tags (document_id, tag_id) VALUES (?, ?)", id, tagID); err != nil {
+					return fmt.Errorf("failed to insert document_tag %d: %w", tagID, err)
+				}
+			}
 		}
-	}
 
-	if input.RemoveInboxTags != nil && *input.RemoveInboxTags {
-		_, _ = h.db.Exec("DELETE FROM document_tags WHERE document_id = ? AND tag_id IN (SELECT id FROM tags WHERE is_inbox_tag = 1)", id)
-	}
-
-	if input.CustomFields != nil {
-		_, _ = h.db.Exec("DELETE FROM document_custom_fields WHERE document_id = ?", id)
-		for _, cf := range *input.CustomFields {
-			valJSON, _ := json.Marshal(cf.Value)
-			_, _ = h.db.Exec("INSERT INTO document_custom_fields (document_id, field_id, value_text) VALUES (?, ?, ?)", id, cf.Field, string(valJSON))
+		if input.RemoveInboxTags != nil && *input.RemoveInboxTags {
+			if _, err := tx.ExecContext(r.Context(), "DELETE FROM document_tags WHERE document_id = ? AND tag_id IN (SELECT id FROM tags WHERE is_inbox_tag = 1)", id); err != nil {
+				return fmt.Errorf("failed to remove inbox tags: %w", err)
+			}
 		}
+
+		if input.CustomFields != nil {
+			if _, err := tx.ExecContext(r.Context(), "DELETE FROM document_custom_fields WHERE document_id = ?", id); err != nil {
+				return fmt.Errorf("failed to clear document_custom_fields: %w", err)
+			}
+			for _, cf := range *input.CustomFields {
+				valJSON, err := json.Marshal(cf.Value)
+				if err != nil {
+					return fmt.Errorf("failed to marshal custom field value: %w", err)
+				}
+				if _, err := tx.ExecContext(r.Context(), "INSERT INTO document_custom_fields (document_id, field_id, value_text) VALUES (?, ?, ?)", id, cf.Field, string(valJSON)); err != nil {
+					return fmt.Errorf("failed to insert custom field %d: %w", cf.Field, err)
+				}
+			}
+		}
+
+		return nil
+	})
+
+	if txErr != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": txErr.Error()})
+		return
 	}
 
 	doc, err := h.fetchDocumentWithUser(id, user)
@@ -1799,7 +1856,9 @@ func (h *DocumentsHandler) Suggestions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		_ = rowsT.Err()
+		if err := rowsT.Err(); err != nil {
+			log.Printf("[WARN] suggestions tags cursor error: %v", err)
+		}
 	}
 
 	// Match correspondents against content & title
@@ -1816,7 +1875,9 @@ func (h *DocumentsHandler) Suggestions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		_ = rowsC.Err()
+		if err := rowsC.Err(); err != nil {
+			log.Printf("[WARN] suggestions correspondents cursor error: %v", err)
+		}
 	}
 
 	// Match document types against content & title
@@ -1833,7 +1894,9 @@ func (h *DocumentsHandler) Suggestions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		_ = rowsDT.Err()
+		if err := rowsDT.Err(); err != nil {
+			log.Printf("[WARN] suggestions document_types cursor error: %v", err)
+		}
 	}
 
 	// Match storage paths against content & title
@@ -1850,7 +1913,9 @@ func (h *DocumentsHandler) Suggestions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		_ = rowsSP.Err()
+		if err := rowsSP.Err(); err != nil {
+			log.Printf("[WARN] suggestions storage_paths cursor error: %v", err)
+		}
 	}
 
 	// Semantic Vector Classifier integration (Feature #6)
@@ -2046,7 +2111,9 @@ func (h *DocumentsHandler) SelectionData(w http.ResponseWriter, r *http.Request)
 				resp.SelectedCorrespondents = append(resp.SelectedCorrespondents, item)
 			}
 		}
-		_ = rowsC.Err()
+		if err := rowsC.Err(); err != nil {
+			log.Printf("[WARN] selection data correspondents cursor error: %v", err)
+		}
 	}
 
 	// Tags
@@ -2062,7 +2129,9 @@ func (h *DocumentsHandler) SelectionData(w http.ResponseWriter, r *http.Request)
 				resp.SelectedTags = append(resp.SelectedTags, item)
 			}
 		}
-		_ = rowsT.Err()
+		if err := rowsT.Err(); err != nil {
+			log.Printf("[WARN] selection data tags cursor error: %v", err)
+		}
 	}
 
 	// Document Types
@@ -2078,7 +2147,9 @@ func (h *DocumentsHandler) SelectionData(w http.ResponseWriter, r *http.Request)
 				resp.SelectedDocumentTypes = append(resp.SelectedDocumentTypes, item)
 			}
 		}
-		_ = rowsDT.Err()
+		if err := rowsDT.Err(); err != nil {
+			log.Printf("[WARN] selection data document_types cursor error: %v", err)
+		}
 	}
 
 	// Storage Paths
@@ -2094,7 +2165,9 @@ func (h *DocumentsHandler) SelectionData(w http.ResponseWriter, r *http.Request)
 				resp.SelectedStoragePaths = append(resp.SelectedStoragePaths, item)
 			}
 		}
-		_ = rowsSP.Err()
+		if err := rowsSP.Err(); err != nil {
+			log.Printf("[WARN] selection data storage_paths cursor error: %v", err)
+		}
 	}
 
 	// Custom Fields
@@ -2110,7 +2183,9 @@ func (h *DocumentsHandler) SelectionData(w http.ResponseWriter, r *http.Request)
 				resp.SelectedCustomFields = append(resp.SelectedCustomFields, item)
 			}
 		}
-		_ = rowsCF.Err()
+		if err := rowsCF.Err(); err != nil {
+			log.Printf("[WARN] selection data custom_fields cursor error: %v", err)
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -2133,166 +2208,212 @@ func (h *DocumentsHandler) BulkEdit(w http.ResponseWriter, r *http.Request) {
 	allowedDocs := h.filterAllowedDocuments(payload.Documents, user)
 	payload.Documents = allowedDocs
 
-	switch payload.Method {
-	case "delete":
-		for _, id := range payload.Documents {
-			_, _ = h.db.Exec("UPDATE documents SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", id)
-		}
-		if h.wsHub != nil {
-			h.wsHub.BroadcastDocumentsDeleted()
-		}
-
-	case "modify_tags":
-		var addTags, removeTags []int
-		if adds, ok := payload.Parameters["add_tags"].([]interface{}); ok {
-			for _, a := range adds {
-				if val, ok := a.(float64); ok {
-					addTags = append(addTags, int(val))
+	txErr := h.db.WithTx(r.Context(), func(tx *sql.Tx) error {
+		switch payload.Method {
+		case "delete":
+			for _, id := range payload.Documents {
+				if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", id); err != nil {
+					return fmt.Errorf("failed marking document %d as deleted: %w", id, err)
 				}
 			}
-		}
-		if rems, ok := payload.Parameters["remove_tags"].([]interface{}); ok {
-			for _, r := range rems {
-				if val, ok := r.(float64); ok {
-					removeTags = append(removeTags, int(val))
-				}
-			}
-		}
 
-		for _, id := range payload.Documents {
-			for _, tid := range addTags {
-				_, _ = h.db.Exec("INSERT OR IGNORE INTO document_tags (document_id, tag_id) VALUES (?, ?)", id, tid)
-			}
-			for _, tid := range removeTags {
-				_, _ = h.db.Exec("DELETE FROM document_tags WHERE document_id = ? AND tag_id = ?", id, tid)
-			}
-		}
-
-	case "set_correspondent":
-		var corrID *int
-		if corrVal, ok := payload.Parameters["correspondent"]; ok && corrVal != nil {
-			if c, ok := corrVal.(float64); ok && c > 0 {
-				idInt := int(c)
-				corrID = &idInt
-			}
-		}
-		for _, id := range payload.Documents {
-			_, _ = h.db.Exec("UPDATE documents SET correspondent_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", corrID, id)
-		}
-
-	case "set_document_type":
-		var dtID *int
-		if typeVal, ok := payload.Parameters["document_type"]; ok && typeVal != nil {
-			if dt, ok := typeVal.(float64); ok && dt > 0 {
-				idInt := int(dt)
-				dtID = &idInt
-			}
-		}
-		for _, id := range payload.Documents {
-			_, _ = h.db.Exec("UPDATE documents SET document_type_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", dtID, id)
-		}
-
-	case "set_storage_path":
-		var spID *int
-		if pathVal, ok := payload.Parameters["storage_path"]; ok && pathVal != nil {
-			if sp, ok := pathVal.(float64); ok && sp > 0 {
-				idInt := int(sp)
-				spID = &idInt
-			}
-		}
-		for _, id := range payload.Documents {
-			_, _ = h.db.Exec("UPDATE documents SET storage_path_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", spID, id)
-		}
-
-	case "modify_custom_fields":
-		if addMap, ok := payload.Parameters["add_custom_fields"].(map[string]interface{}); ok {
-			for fidStr, val := range addMap {
-				if fid, err := strconv.Atoi(fidStr); err == nil {
-					valJSON, _ := json.Marshal(val)
-					for _, id := range payload.Documents {
-						_, _ = h.db.Exec("DELETE FROM document_custom_fields WHERE document_id = ? AND field_id = ?", id, fid)
-						_, _ = h.db.Exec("INSERT INTO document_custom_fields (document_id, field_id, value_text) VALUES (?, ?, ?)", id, fid, string(valJSON))
+		case "modify_tags":
+			var addTags, removeTags []int
+			if adds, ok := payload.Parameters["add_tags"].([]interface{}); ok {
+				for _, a := range adds {
+					if val, ok := a.(float64); ok {
+						addTags = append(addTags, int(val))
 					}
 				}
 			}
-		}
-		if rems, ok := payload.Parameters["remove_custom_fields"].([]interface{}); ok {
-			for _, r := range rems {
-				if fid, ok := r.(float64); ok {
-					for _, id := range payload.Documents {
-						_, _ = h.db.Exec("DELETE FROM document_custom_fields WHERE document_id = ? AND field_id = ?", id, int(fid))
+			if rems, ok := payload.Parameters["remove_tags"].([]interface{}); ok {
+				for _, r := range rems {
+					if val, ok := r.(float64); ok {
+						removeTags = append(removeTags, int(val))
 					}
 				}
 			}
-		}
 
-	case "set_permissions":
-		var ownerID *int
-		if ownerVal, ok := payload.Parameters["owner"]; ok && ownerVal != nil {
-			if o, ok := ownerVal.(float64); ok && o > 0 {
-				idInt := int(o)
-				ownerID = &idInt
+			for _, id := range payload.Documents {
+				for _, tid := range addTags {
+					if _, err := tx.ExecContext(r.Context(), "INSERT OR IGNORE INTO document_tags (document_id, tag_id) VALUES (?, ?)", id, tid); err != nil {
+						return fmt.Errorf("failed adding tag %d to document %d: %w", tid, id, err)
+					}
+				}
+				for _, tid := range removeTags {
+					if _, err := tx.ExecContext(r.Context(), "DELETE FROM document_tags WHERE document_id = ? AND tag_id = ?", id, tid); err != nil {
+						return fmt.Errorf("failed removing tag %d from document %d: %w", tid, id, err)
+					}
+				}
 			}
-		}
-		for _, id := range payload.Documents {
-			if ownerID == nil {
-				_, _ = h.db.Exec("UPDATE documents SET owner_id = NULL, modified = CURRENT_TIMESTAMP WHERE id = ?", id)
-			} else {
-				_, _ = h.db.Exec("UPDATE documents SET owner_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *ownerID, id)
-			}
-		}
 
-	case "rotate":
-		var degrees int
-		if degVal, ok := payload.Parameters["degrees"].(float64); ok {
-			degrees = int(degVal)
-		}
-		for _, id := range payload.Documents {
-			filePath, mimeType, err := h.getOriginalFilePath(id)
-			if err == nil && strings.Contains(mimeType, "pdf") {
-				// Re-generate thumbnail after rotation
-				thumbPath := filepath.Join(h.cfg.MediaDir, "documents", "thumbnails", fmt.Sprintf("%07d.png", id))
-				_ = consumer.GenerateThumbnail(filePath, thumbPath, mimeType)
-				_, _ = h.db.Exec("UPDATE documents SET modified = CURRENT_TIMESTAMP WHERE id = ?", id)
+		case "set_correspondent":
+			var corrID *int
+			if corrVal, ok := payload.Parameters["correspondent"]; ok && corrVal != nil {
+				if c, ok := corrVal.(float64); ok && c > 0 {
+					idInt := int(c)
+					corrID = &idInt
+				}
 			}
-		}
-		_ = degrees
+			for _, id := range payload.Documents {
+				if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET correspondent_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", corrID, id); err != nil {
+					return fmt.Errorf("failed setting correspondent for document %d: %w", id, err)
+				}
+			}
 
-	case "merge":
-		deleteOriginals := false
-		if delVal, ok := payload.Parameters["delete_originals"].(bool); ok {
-			deleteOriginals = delVal
-		}
-		if len(payload.Documents) > 1 {
-			primaryID := payload.Documents[0]
-			// Update primary document modification time
-			_, _ = h.db.Exec("UPDATE documents SET modified = CURRENT_TIMESTAMP WHERE id = ?", primaryID)
-			if deleteOriginals {
-				for _, secondaryID := range payload.Documents[1:] {
-					_, _ = h.db.Exec("UPDATE documents SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", secondaryID)
+		case "set_document_type":
+			var dtID *int
+			if typeVal, ok := payload.Parameters["document_type"]; ok && typeVal != nil {
+				if dt, ok := typeVal.(float64); ok && dt > 0 {
+					idInt := int(dt)
+					dtID = &idInt
+				}
+			}
+			for _, id := range payload.Documents {
+				if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET document_type_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", dtID, id); err != nil {
+					return fmt.Errorf("failed setting document_type for document %d: %w", id, err)
+				}
+			}
+
+		case "set_storage_path":
+			var spID *int
+			if pathVal, ok := payload.Parameters["storage_path"]; ok && pathVal != nil {
+				if sp, ok := pathVal.(float64); ok && sp > 0 {
+					idInt := int(sp)
+					spID = &idInt
+				}
+			}
+			for _, id := range payload.Documents {
+				if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET storage_path_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", spID, id); err != nil {
+					return fmt.Errorf("failed setting storage_path for document %d: %w", id, err)
+				}
+			}
+
+		case "modify_custom_fields":
+			if addMap, ok := payload.Parameters["add_custom_fields"].(map[string]interface{}); ok {
+				for fidStr, val := range addMap {
+					if fid, err := strconv.Atoi(fidStr); err == nil {
+						valJSON, err := json.Marshal(val)
+						if err != nil {
+							return fmt.Errorf("failed marshaling custom field %d: %w", fid, err)
+						}
+						for _, id := range payload.Documents {
+							if _, err := tx.ExecContext(r.Context(), "DELETE FROM document_custom_fields WHERE document_id = ? AND field_id = ?", id, fid); err != nil {
+								return fmt.Errorf("failed clearing custom field %d on document %d: %w", fid, id, err)
+							}
+							if _, err := tx.ExecContext(r.Context(), "INSERT INTO document_custom_fields (document_id, field_id, value_text) VALUES (?, ?, ?)", id, fid, string(valJSON)); err != nil {
+								return fmt.Errorf("failed inserting custom field %d on document %d: %w", fid, id, err)
+							}
+						}
+					}
+				}
+			}
+			if rems, ok := payload.Parameters["remove_custom_fields"].([]interface{}); ok {
+				for _, remItem := range rems {
+					if fid, ok := remItem.(float64); ok {
+						for _, id := range payload.Documents {
+							if _, err := tx.ExecContext(r.Context(), "DELETE FROM document_custom_fields WHERE document_id = ? AND field_id = ?", id, int(fid)); err != nil {
+								return fmt.Errorf("failed removing custom field %d on document %d: %w", int(fid), id, err)
+							}
+						}
+					}
+				}
+			}
+
+		case "set_permissions":
+			var ownerID *int
+			if ownerVal, ok := payload.Parameters["owner"]; ok && ownerVal != nil {
+				if o, ok := ownerVal.(float64); ok && o > 0 {
+					idInt := int(o)
+					ownerID = &idInt
+				}
+			}
+			for _, id := range payload.Documents {
+				if ownerID == nil {
+					if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET owner_id = NULL, modified = CURRENT_TIMESTAMP WHERE id = ?", id); err != nil {
+						return fmt.Errorf("failed resetting owner on document %d: %w", id, err)
+					}
+				} else {
+					if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET owner_id = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", *ownerID, id); err != nil {
+						return fmt.Errorf("failed updating owner on document %d: %w", id, err)
+					}
+				}
+			}
+
+		case "rotate":
+			var degrees int
+			if degVal, ok := payload.Parameters["degrees"].(float64); ok {
+				degrees = int(degVal)
+			}
+			for _, id := range payload.Documents {
+				filePath, mimeType, err := h.getOriginalFilePath(id)
+				if err == nil && strings.Contains(mimeType, "pdf") {
+					thumbPath := filepath.Join(h.cfg.MediaDir, "documents", "thumbnails", fmt.Sprintf("%07d.png", id))
+					_ = consumer.GenerateThumbnail(filePath, thumbPath, mimeType)
+					if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET modified = CURRENT_TIMESTAMP WHERE id = ?", id); err != nil {
+						return fmt.Errorf("failed updating modified timestamp on rotated document %d: %w", id, err)
+					}
+				}
+			}
+			_ = degrees
+
+		case "merge":
+			deleteOriginals := false
+			if delVal, ok := payload.Parameters["delete_originals"].(bool); ok {
+				deleteOriginals = delVal
+			}
+			if len(payload.Documents) > 1 {
+				primaryID := payload.Documents[0]
+				if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET modified = CURRENT_TIMESTAMP WHERE id = ?", primaryID); err != nil {
+					return fmt.Errorf("failed updating primary document %d: %w", primaryID, err)
+				}
+				if deleteOriginals {
+					for _, secondaryID := range payload.Documents[1:] {
+						if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", secondaryID); err != nil {
+							return fmt.Errorf("failed marking secondary document %d as deleted: %w", secondaryID, err)
+						}
+					}
+				}
+			}
+
+		case "delete_pages", "edit_pdf", "remove_password":
+			for _, id := range payload.Documents {
+				if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET modified = CURRENT_TIMESTAMP WHERE id = ?", id); err != nil {
+					return fmt.Errorf("failed updating modified timestamp for document %d: %w", id, err)
+				}
+			}
+
+		case "reprocess":
+			for _, id := range payload.Documents {
+				filePath, mimeType, err := h.getOriginalFilePath(id)
+				if err == nil {
+					text, _ := consumer.ExtractText(filePath, mimeType)
+					if text != "" {
+						compressed := compress.CompressText(text)
+						if _, err := tx.ExecContext(r.Context(), "UPDATE documents SET content = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", compressed, id); err != nil {
+							return fmt.Errorf("failed updating content for document %d: %w", id, err)
+						}
+						if _, err := tx.ExecContext(r.Context(), "INSERT OR REPLACE INTO documents_fts (rowid, title, content) VALUES (?, (SELECT title FROM documents WHERE id = ?), ?)", id, id, text); err != nil {
+							return fmt.Errorf("failed updating fts for document %d: %w", id, err)
+						}
+					}
+					thumbPath := filepath.Join(h.cfg.MediaDir, "documents", "thumbnails", fmt.Sprintf("%07d.png", id))
+					_ = consumer.GenerateThumbnail(filePath, thumbPath, mimeType)
 				}
 			}
 		}
+		return nil
+	})
 
-	case "delete_pages", "edit_pdf", "remove_password":
-		for _, id := range payload.Documents {
-			_, _ = h.db.Exec("UPDATE documents SET modified = CURRENT_TIMESTAMP WHERE id = ?", id)
-		}
+	if txErr != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": txErr.Error()})
+		return
+	}
 
-	case "reprocess":
-		for _, id := range payload.Documents {
-			filePath, mimeType, err := h.getOriginalFilePath(id)
-			if err == nil {
-				text, _ := consumer.ExtractText(filePath, mimeType)
-				if text != "" {
-					compressed := compress.CompressText(text)
-					_, _ = h.db.Exec("UPDATE documents SET content = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", compressed, id)
-					_, _ = h.db.Exec("INSERT OR REPLACE INTO documents_fts (rowid, title, content) VALUES (?, (SELECT title FROM documents WHERE id = ?), ?)", id, id, text)
-				}
-				thumbPath := filepath.Join(h.cfg.MediaDir, "documents", "thumbnails", fmt.Sprintf("%07d.png", id))
-				_ = consumer.GenerateThumbnail(filePath, thumbPath, mimeType)
-			}
-		}
+	if payload.Method == "delete" && h.wsHub != nil {
+		h.wsHub.BroadcastDocumentsDeleted()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -2343,7 +2464,10 @@ func (h *DocumentsHandler) TrashList(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	_ = rows.Err()
+	if err := rows.Err(); err != nil {
+		http.Error(w, fmt.Sprintf("cursor error fetching trash documents: %v", err), http.StatusInternalServerError)
+		return
+	}
 	if results == nil {
 		results = []*models.Document{}
 		allIDs = []int{}
@@ -2394,23 +2518,64 @@ func (h *DocumentsHandler) TrashAction(w http.ResponseWriter, r *http.Request) {
 						ids = append(ids, id)
 					}
 				}
-				_ = rows.Err()
+				if err := rows.Err(); err != nil {
+					http.Error(w, fmt.Sprintf("failed iterating trash documents: %v", err), http.StatusInternalServerError)
+					return
+				}
 			}
 		}
+
+		type fileToDelete struct {
+			orig  string
+			arch  string
+			thumb string
+		}
+		var filesToShred []fileToDelete
 
 		for _, id := range ids {
 			var origName string
 			_ = h.db.QueryRow("SELECT original_filename FROM documents WHERE id = ?", id).Scan(&origName)
 			ext := filepath.Ext(origName)
-			// Cryptographic secure shredding of confidential files before unlinking
-			_ = crypto.ShredFile(filepath.Join(h.cfg.MediaDir, "documents", "originals", fmt.Sprintf("%07d%s", id, ext)))
-			_ = crypto.ShredFile(filepath.Join(h.cfg.MediaDir, "documents", "archive", fmt.Sprintf("%07d.pdf", id)))
-			_ = crypto.ShredFile(filepath.Join(h.cfg.MediaDir, "documents", "thumbnails", fmt.Sprintf("%07d.png", id)))
-			_, _ = h.db.Exec("DELETE FROM documents WHERE id = ?", id)
-			_, _ = h.db.Exec("DELETE FROM documents_fts WHERE rowid = ?", id)
-			_, _ = h.db.Exec("DELETE FROM document_tags WHERE document_id = ?", id)
-			_, _ = h.db.Exec("DELETE FROM document_notes WHERE document_id = ?", id)
-			_, _ = h.db.Exec("DELETE FROM document_custom_fields WHERE document_id = ?", id)
+			filesToShred = append(filesToShred, fileToDelete{
+				orig:  filepath.Join(h.cfg.MediaDir, "documents", "originals", fmt.Sprintf("%07d%s", id, ext)),
+				arch:  filepath.Join(h.cfg.MediaDir, "documents", "archive", fmt.Sprintf("%07d.pdf", id)),
+				thumb: filepath.Join(h.cfg.MediaDir, "documents", "thumbnails", fmt.Sprintf("%07d.png", id)),
+			})
+		}
+
+		txErr := h.db.WithTx(r.Context(), func(tx *sql.Tx) error {
+			for _, id := range ids {
+				if _, err := tx.ExecContext(r.Context(), "DELETE FROM documents WHERE id = ?", id); err != nil {
+					return fmt.Errorf("failed deleting document %d: %w", id, err)
+				}
+				if _, err := tx.ExecContext(r.Context(), "DELETE FROM documents_fts WHERE rowid = ?", id); err != nil {
+					return fmt.Errorf("failed deleting fts for document %d: %w", id, err)
+				}
+				if _, err := tx.ExecContext(r.Context(), "DELETE FROM document_tags WHERE document_id = ?", id); err != nil {
+					return fmt.Errorf("failed deleting tags for document %d: %w", id, err)
+				}
+				if _, err := tx.ExecContext(r.Context(), "DELETE FROM document_notes WHERE document_id = ?", id); err != nil {
+					return fmt.Errorf("failed deleting notes for document %d: %w", id, err)
+				}
+				if _, err := tx.ExecContext(r.Context(), "DELETE FROM document_custom_fields WHERE document_id = ?", id); err != nil {
+					return fmt.Errorf("failed deleting custom fields for document %d: %w", id, err)
+				}
+			}
+			return nil
+		})
+
+		if txErr != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"detail": txErr.Error()})
+			return
+		}
+
+		// Cryptographic secure shredding only after transactional database deletion succeeds
+		for _, f := range filesToShred {
+			_ = crypto.ShredFile(f.orig)
+			_ = crypto.ShredFile(f.arch)
+			_ = crypto.ShredFile(f.thumb)
 		}
 	}
 
@@ -2498,7 +2663,9 @@ func (h *DocumentsHandler) fetchDocumentWithUser(id int, user *models.User) (*mo
 					doc.DuplicateDocuments = append(doc.DuplicateDocuments, dupID)
 				}
 			}
-			_ = rowsDup.Err()
+			if err := rowsDup.Err(); err != nil {
+				log.Printf("[WARN] find duplicate checksums cursor error for doc %d: %v", doc.ID, err)
+			}
 		}
 	}
 	// Fuzzy duplicate detection (>90% text similarity)
@@ -2544,7 +2711,9 @@ func (h *DocumentsHandler) getDocTags(docID int) []int {
 			tags = append(tags, tid)
 		}
 	}
-	_ = rows.Err()
+	if err := rows.Err(); err != nil {
+		log.Printf("[WARN] getDocTags cursor error for doc %d: %v", docID, err)
+	}
 	if tags == nil {
 		tags = []int{}
 	}
@@ -2570,7 +2739,9 @@ func (h *DocumentsHandler) getDocNotes(docID int) []models.DocumentNote {
 			notes = append(notes, n)
 		}
 	}
-	_ = rows.Err()
+	if err := rows.Err(); err != nil {
+		log.Printf("[WARN] getDocNotes cursor error for doc %d: %v", docID, err)
+	}
 	if notes == nil {
 		notes = []models.DocumentNote{}
 	}
@@ -2593,7 +2764,9 @@ func (h *DocumentsHandler) getDocCustomFields(docID int) []models.DocumentCustom
 			cfs = append(cfs, cf)
 		}
 	}
-	_ = rows.Err()
+	if err := rows.Err(); err != nil {
+		log.Printf("[WARN] getDocCustomFields cursor error for doc %d: %v", docID, err)
+	}
 	if cfs == nil {
 		cfs = []models.DocumentCustomFieldValue{}
 	}

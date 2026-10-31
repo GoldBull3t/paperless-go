@@ -3,6 +3,7 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
+	"log"
 	"net/http"
 	"runtime"
 
@@ -63,7 +64,9 @@ func (h *StatisticsHandler) Get(w http.ResponseWriter, r *http.Request) {
 				fileTypeCounts = append(fileTypeCounts, item)
 			}
 		}
-		_ = rows.Err()
+		if err := rows.Err(); err != nil {
+			log.Printf("[WARN] statistics file type counts cursor error: %v", err)
+		}
 	}
 	if fileTypeCounts == nil {
 		fileTypeCounts = []models.DocumentFileTypeCountItem{}
