@@ -115,9 +115,9 @@ func NewRouter(
 	schemaH := NewSchemaHandler()
 	mailH := NewMailHandler(db)
 	systemH := NewSystemHandler(db, cfg)
-	vaultMgr := vault.NewVaultManager(db)
+	vaultMgr := vault.NewVaultManager(db, cfg.MediaDir)
 	docsH.SetVaultManager(vaultMgr)
-	vaultH := NewVaultHandler(vaultMgr)
+	vaultH := NewVaultHandler(vaultMgr, cfg.MediaDir)
 
 	// API subrouter
 	apiRouter := func(r chi.Router) {
@@ -376,6 +376,9 @@ func NewRouter(
 				r.Post("/setup/", vaultH.Setup)
 				r.Post("/unlock/", vaultH.Unlock)
 				r.Post("/lock/", vaultH.Lock)
+				r.Post("/change_password/", vaultH.ChangePassword)
+				r.Post("/recover/", vaultH.Recover)
+				r.Post("/rotate_key/", vaultH.RotateKey)
 			})
 
 			// System Integrity, Status, Diagnostics & Online Zero-Downtime Backup

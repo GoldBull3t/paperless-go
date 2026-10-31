@@ -1,4 +1,4 @@
-﻿package crypto
+package crypto
 
 import (
 	"crypto/sha256"
@@ -35,6 +35,23 @@ func VerifyFileIntegrity(filePath, expectedHash, secretKey string) (bool, error)
 	h := sha256.New()
 	if _, err := io.Copy(h, stream); err != nil {
 		return false, fmt.Errorf("failed to read stream for hash: %w", err)
+	}
+
+	actualHash := hex.EncodeToString(h.Sum(nil))
+	return actualHash == expectedHash, nil
+}
+
+// VerifyVaultFileIntegrity checks if the vault-encrypted file on disk matches its expected SHA-256 hash.
+func VerifyVaultFileIntegrity(filePath, expectedHash string, vmek []byte) (bool, error) {
+	stream, err := OpenVaultDecryptedStream(filePath, vmek)
+	if err != nil {
+		return false, fmt.Errorf("failed to open vault stream for verification: %w", err)
+	}
+	defer stream.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, stream); err != nil {
+		return false, fmt.Errorf("failed to read vault stream for hash: %w", err)
 	}
 
 	actualHash := hex.EncodeToString(h.Sum(nil))

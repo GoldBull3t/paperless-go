@@ -1,4 +1,4 @@
-﻿package crypto
+package crypto
 
 import (
 	"bytes"
@@ -14,6 +14,7 @@ import (
 
 var (
 	MagicHeader       = []byte("PPLX:ENC:1\n")
+	VaultMagicHeader  = []byte("PPLX:VAULT:1\n")
 	ErrInvalidHeader  = errors.New("file is not encrypted or header is invalid")
 	ErrDecryptionFail = errors.New("decryption failed: incorrect key or corrupted file")
 )
@@ -143,6 +144,136 @@ func OpenDecryptedStream(path, secret string) (io.ReadCloser, error) {
 	}
 
 	headerLen := len(MagicHeader)
+	nonceSize := gcm.NonceSize()
+	if len(inData) < headerLen+nonceSize {
+		return nil, ErrInvalidHeader
+	}
+
+	nonce := inData[headerLen : headerLen+nonceSize]
+	ciphertext := inData[headerLen+nonceSize:]
+
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, ErrDecryptionFail
+	}
+
+	return io.NopCloser(bytes.NewReader(plaintext)), nil
+}
+
+// IsVaultEncryptedFile checks if the file begins with the Paperless vault magic header
+func IsVaultEncryptedFile(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	header := make([]byte, len(VaultMagicHeader))
+	n, err := io.ReadFull(f, header)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return false, err
+	}
+	if n < len(VaultMagicHeader) {
+		return false, nil
+	}
+	return bytes.Equal(header, VaultMagicHeader), nil
+}
+
+// EncryptVaultFile encrypts src to dst using AES-256-GCM with the vault master encryption key (VMEK) atomically
+func EncryptVaultFile(src, dst string, vmek []byte) error {
+	inData, err := os.ReadFile(src)
+	if err != nil {
+		return fmt.Errorf("failed to read source file for vault encryption: %w", err)
+	}
+
+	block, err := aes.NewCipher(vmek)
+	if err != nil {
+		return err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return err
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return err
+	}
+
+	ciphertext := gcm.Seal(nil, nonce, inData, nil)
+
+	var buf bytes.Buffer
+	buf.Write(VaultMagicHeader)
+	buf.Write(nonce)
+	buf.Write(ciphertext)
+
+	return AtomicWrite(dst, &buf)
+}
+
+// DecryptVaultFile decrypts src to dst using AES-256-GCM with the vault master encryption key (VMEK) atomically
+func DecryptVaultFile(src, dst string, vmek []byte) error {
+	inData, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+
+	headerLen := len(VaultMagicHeader)
+	if len(inData) < headerLen || !bytes.Equal(inData[:headerLen], VaultMagicHeader) {
+		return ErrInvalidHeader
+	}
+
+	block, err := aes.NewCipher(vmek)
+	if err != nil {
+		return err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return err
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(inData) < headerLen+nonceSize {
+		return ErrInvalidHeader
+	}
+
+	nonce := inData[headerLen : headerLen+nonceSize]
+	ciphertext := inData[headerLen+nonceSize:]
+
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return ErrDecryptionFail
+	}
+
+	return AtomicWrite(dst, bytes.NewReader(plaintext))
+}
+
+// OpenVaultDecryptedStream returns an io.ReadCloser for a vault-encrypted file.
+// If the file is encrypted with VaultMagicHeader, it decrypts it in memory with vmek.
+// If not, it opens the normal file.
+func OpenVaultDecryptedStream(path string, vmek []byte) (io.ReadCloser, error) {
+	encrypted, err := IsVaultEncryptedFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if !encrypted {
+		return os.Open(path)
+	}
+
+	inData, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	headerLen := len(VaultMagicHeader)
+	block, err := aes.NewCipher(vmek)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
 	nonceSize := gcm.NonceSize()
 	if len(inData) < headerLen+nonceSize {
 		return nil, ErrInvalidHeader

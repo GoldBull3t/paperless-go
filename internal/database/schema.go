@@ -1,4 +1,4 @@
-﻿package database
+package database
 
 const SchemaSQL = `
 PRAGMA foreign_keys = ON;
@@ -166,6 +166,7 @@ CREATE TABLE IF NOT EXISTS documents (
     root_document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL,
     extracted_metadata_json TEXT DEFAULT '{}',
     is_vault INTEGER DEFAULT 0,
+    vault_key_version INTEGER DEFAULT 1,
     deleted_at DATETIME
 );
 
@@ -313,6 +314,10 @@ CREATE TABLE IF NOT EXISTS vault_config (
     is_enabled INTEGER DEFAULT 0,
     salt_hex TEXT NOT NULL,
     verifier_hash TEXT NOT NULL,
+    wrapped_key_hex TEXT DEFAULT '',
+    key_version INTEGER DEFAULT 1,
+    recovery_salt_hex TEXT DEFAULT '',
+    recovery_wrapped_key_hex TEXT DEFAULT '',
     auto_lock_minutes INTEGER DEFAULT 15,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP

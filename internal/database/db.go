@@ -307,6 +307,29 @@ func (db *DB) migrate() error {
 				return nil
 			},
 		},
+		{
+			version: 5,
+			name:    "0005_vault_envelope_encryption_and_rotation",
+			run: func(db *DB) error {
+				vaultColumns := []struct {
+					table  string
+					column string
+					def    string
+				}{
+					{"vault_config", "wrapped_key_hex", "TEXT DEFAULT ''"},
+					{"vault_config", "key_version", "INTEGER DEFAULT 1"},
+					{"vault_config", "recovery_salt_hex", "TEXT DEFAULT ''"},
+					{"vault_config", "recovery_wrapped_key_hex", "TEXT DEFAULT ''"},
+					{"documents", "vault_key_version", "INTEGER DEFAULT 1"},
+				}
+				for _, col := range vaultColumns {
+					if err := addColumnIfNotExists(db, col.table, col.column, col.def); err != nil {
+						return fmt.Errorf("migration 5 error adding %s.%s: %w", col.table, col.column, err)
+					}
+				}
+				return nil
+			},
+		},
 	}
 
 	for _, m := range migrations {

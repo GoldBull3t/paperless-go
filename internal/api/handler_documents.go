@@ -1504,7 +1504,12 @@ func (h *DocumentsHandler) Preview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stream, err := crypto.OpenDecryptedStream(filePath, h.cfg.EncryptionKey)
+	var stream io.ReadCloser
+	if isVault == 1 && h.vm != nil {
+		stream, err = h.vm.OpenDecryptedStream(filePath)
+	} else {
+		stream, err = crypto.OpenDecryptedStream(filePath, h.cfg.EncryptionKey)
+	}
 	if err != nil {
 		http.Error(w, "Error accessing document: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1549,7 +1554,16 @@ func (h *DocumentsHandler) Download(w http.ResponseWriter, r *http.Request) {
 	_ = h.db.QueryRow("SELECT original_filename, checksum FROM documents WHERE id = ?", id).Scan(&origName, &checksum)
 
 	// Bit Rot / Integrity Guard: Verify SHA-256 integrity on download
-	valid, err := crypto.VerifyFileIntegrity(filePath, checksum, h.cfg.EncryptionKey)
+	var valid bool
+	if isVault == 1 && h.vm != nil {
+		if vmek, vErr := h.vm.GetActiveVMEK(); vErr == nil {
+			valid, err = crypto.VerifyVaultFileIntegrity(filePath, checksum, vmek)
+		} else {
+			valid, err = crypto.VerifyFileIntegrity(filePath, checksum, h.cfg.EncryptionKey)
+		}
+	} else {
+		valid, err = crypto.VerifyFileIntegrity(filePath, checksum, h.cfg.EncryptionKey)
+	}
 	if err == nil && !valid {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
@@ -1559,7 +1573,12 @@ func (h *DocumentsHandler) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stream, err := crypto.OpenDecryptedStream(filePath, h.cfg.EncryptionKey)
+	var stream io.ReadCloser
+	if isVault == 1 && h.vm != nil {
+		stream, err = h.vm.OpenDecryptedStream(filePath)
+	} else {
+		stream, err = crypto.OpenDecryptedStream(filePath, h.cfg.EncryptionKey)
+	}
 	if err != nil {
 		http.Error(w, "Error accessing document: "+err.Error(), http.StatusInternalServerError)
 		return
