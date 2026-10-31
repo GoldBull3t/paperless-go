@@ -120,9 +120,11 @@ Além de ser incomparavelmente mais rápido e leve, o **paperless-go** traz inov
 ### 8. Partilha Pública de Documentos (`/share/{slug}`)
 - Partilhe documentos individuais através de links seguros com expiração temporal configurável e landing page de pré-visualização limpa, sem expor o painel administrativo.
 
-### 9. Fila Persistente com Recuperação de Falhas & Watcher Resiliente
+### 9. Fila Persistente, Dead-Letter Queue (DLQ) & OCR Resiliente
 - **Fila de Background com Persistência SQLite:** Tarefas de ingestão e processamento registadas em base de dados com `payload_json` e contagem de tentativas (`max_attempts: 3`).
 - **Recuperação Automática (*Crash-Recovery*):** Ao reiniciar o contentor ou servidor, qualquer tarefa interrompida em estado `PENDING` ou `STARTED` é recuperada e retomada sem perda de trabalho.
+- **Dead-Letter Queue (DLQ) com Retentativas Exponenciais:** Tarefas que falham por condições transitórias são repetidas com backoff exponencial (1s, 2s, 4s). Ao atingir o limite máximo de tentativas, transitam para a Dead-Letter Queue com diagnóstico detalhado auditável via `/api/tasks/?status=dlq`.
+- **Cancelamento Estrito e Timeouts no Pool de OCR:** O motor de extração e OCR (`pdftoppm`, `tesseract`, `ocrmypdf`) é estritamente governado por `context.Context` com timeout por página (45s) e por tarefa (15m), garantindo terminação imediata de subprocessos e zero processos órfãos ou fugas de CPU/RAM.
 - **Proteção Absoluta de Ficheiros na Ingestão:** O monitor de diretórios (`Watcher`) verifica estabilidade de escrita antes de processar, preserva duplicados em `.duplicates/` e protege ficheiros com erro em `.failed/`.
 - **Compressão HTTP Gzip/Deflate Nativa:** Redução substancial de largura de banda na entrega de assets da SPA Angular e payloads JSON volumosos.
 

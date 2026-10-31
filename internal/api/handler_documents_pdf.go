@@ -227,3 +227,4 @@ func (h *DocumentsHandler) RemovePassword(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"result": "OK"}`))
 }
+

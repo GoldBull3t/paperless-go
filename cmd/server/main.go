@@ -218,7 +218,7 @@ func main() {
 		if p.FilePath != "" {
 			defer os.Remove(p.FilePath)
 		}
-		return docConsumer.ConsumeFileWithFallback(p.FilePath, p.FileName, p.ConsumeDir)
+		return docConsumer.ConsumeFileWithFallbackContext(ctx, p.FilePath, p.FileName, p.ConsumeDir)
 	}
 	taskQueue.RegisterHandler("consume_document", consumeHandler)
 	taskQueue.RegisterHandler("file_handling", consumeHandler)

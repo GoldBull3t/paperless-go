@@ -1,8 +1,9 @@
-﻿package consumer
+package consumer
 
 import (
 	"bytes"
 	"compress/zlib"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -54,8 +55,17 @@ var ptMonths = map[string]time.Month{
 	"dec":       time.December,
 }
 
-// ExtractText extracts text using pdftotext, native fallback, office parser, or OCR
+// ExtractText extracts text using pdftotext, native fallback, office parser, or OCR (with background context)
 func ExtractText(filePath, mimeType string) (string, error) {
+	return ExtractTextWithContext(context.Background(), filePath, mimeType)
+}
+
+// ExtractTextWithContext extracts text honoring context cancellation and timeouts
+func ExtractTextWithContext(ctx context.Context, filePath, mimeType string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	// 0. Check for Office documents (.docx, .xlsx, .pptx, .odt, .ods)
 	if IsOfficeDocument(filePath, mimeType) {
 		text, err := ExtractOfficeText(filePath)
@@ -67,7 +77,7 @@ func ExtractText(filePath, mimeType string) (string, error) {
 	if strings.Contains(mimeType, "pdf") {
 		// 1. Try poppler's pdftotext first (most accurate for PDF standard encodings and fonts)
 		if _, err := exec.LookPath("pdftotext"); err == nil {
-			cmd := exec.Command("pdftotext", "-layout", filePath, "-")
+			cmd := exec.CommandContext(ctx, "pdftotext", "-layout", filePath, "-")
 			out, err := cmd.Output()
 			if err == nil {
 				text := strings.TrimSpace(string(out))
@@ -84,7 +94,7 @@ func ExtractText(filePath, mimeType string) (string, error) {
 		}
 
 		// 3. Fallback: OCR rendering using pdftoppm + tesseract if text is not embedded (scanned PDF)
-		if ocrText, err := ocrScannedPDF(filePath); err == nil && len(ocrText) > 0 {
+		if ocrText, err := ocrScannedPDFWithContext(ctx, filePath); err == nil && len(ocrText) > 0 {
 			return ocrText, nil
 		}
 
@@ -94,7 +104,7 @@ func ExtractText(filePath, mimeType string) (string, error) {
 	} else if strings.HasPrefix(mimeType, "image/") {
 		// Run OCR directly on image files
 		if _, err := exec.LookPath("tesseract"); err == nil {
-			cmd := exec.Command("tesseract", filePath, "stdout", "-l", "por+eng")
+			cmd := exec.CommandContext(ctx, "tesseract", filePath, "stdout", "-l", "por+eng")
 			out, err := cmd.Output()
 			if err == nil {
 				return strings.TrimSpace(string(out)), nil
@@ -152,8 +162,13 @@ func ExtractDocumentDate(text string) *time.Time {
 	return nil
 }
 
-// GenerateArchivePDF attempts to produce a searchable PDF/A using ocrmypdf if available
+// GenerateArchivePDF attempts to produce a searchable PDF/A using ocrmypdf if available (with background context)
 func GenerateArchivePDF(inputPath, outputPath string) bool {
+	return GenerateArchivePDFWithContext(context.Background(), inputPath, outputPath)
+}
+
+// GenerateArchivePDFWithContext attempts to produce a searchable PDF/A with context cancellation
+func GenerateArchivePDFWithContext(ctx context.Context, inputPath, outputPath string) bool {
 	mode := os.Getenv("PAPERLESS_OCR_MODE")
 	if mode == "" {
 		mode = "skip"
@@ -166,11 +181,19 @@ func GenerateArchivePDF(inputPath, outputPath string) bool {
 	deskew := os.Getenv("PAPERLESS_OCR_DESKEW") == "true" || os.Getenv("PAPERLESS_OCR_DESKEW") == "1"
 	rotate := os.Getenv("PAPERLESS_OCR_ROTATE_PAGES") == "true" || os.Getenv("PAPERLESS_OCR_ROTATE_PAGES") == "1"
 
-	return GenerateArchivePDFWithConfig(inputPath, outputPath, mode, lang, deskew, rotate, clean)
+	return GenerateArchivePDFWithConfigContext(ctx, inputPath, outputPath, mode, lang, deskew, rotate, clean)
 }
 
 // GenerateArchivePDFWithConfig produces a searchable PDF/A honoring configurable parameters
 func GenerateArchivePDFWithConfig(inputPath, outputPath, mode, lang string, deskew, rotate, clean bool) bool {
+	return GenerateArchivePDFWithConfigContext(context.Background(), inputPath, outputPath, mode, lang, deskew, rotate, clean)
+}
+
+// GenerateArchivePDFWithConfigContext produces a searchable PDF/A honoring configurable parameters and context cancellation
+func GenerateArchivePDFWithConfigContext(ctx context.Context, inputPath, outputPath, mode, lang string, deskew, rotate, clean bool) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if _, err := exec.LookPath("ocrmypdf"); err == nil {
 		args := []string{}
 		switch strings.ToLower(mode) {
@@ -195,7 +218,7 @@ func GenerateArchivePDFWithConfig(inputPath, outputPath, mode, lang string, desk
 		}
 		args = append(args, "-l", lang, inputPath, outputPath)
 
-		cmd := exec.Command("ocrmypdf", args...)
+		cmd := exec.CommandContext(ctx, "ocrmypdf", args...)
 		if err := cmd.Run(); err == nil {
 			if info, err := os.Stat(outputPath); err == nil && info.Size() > 0 {
 				return true
@@ -266,6 +289,13 @@ func DetectPageCount(filePath, mimeType string) int {
 }
 
 func ocrScannedPDF(filePath string) (string, error) {
+	return ocrScannedPDFWithContext(context.Background(), filePath)
+}
+
+func ocrScannedPDFWithContext(ctx context.Context, filePath string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if _, err := exec.LookPath("pdftoppm"); err != nil {
 		return "", fmt.Errorf("pdftoppm not found")
 	}
@@ -285,8 +315,8 @@ func ocrScannedPDF(filePath string) (string, error) {
 		}
 	}()
 
-	// Render all pages (up to 100 pages) at 150 DPI
-	renderCmd := exec.Command("pdftoppm", "-png", "-r", "150", "-f", "1", "-l", "100", filePath, tmpImgPrefix)
+	// Render all pages (up to 100 pages) at 150 DPI with context cancellation
+	renderCmd := exec.CommandContext(ctx, "pdftoppm", "-png", "-r", "150", "-f", "1", "-l", "100", filePath, tmpImgPrefix)
 	if err := renderCmd.Run(); err != nil {
 		return "", err
 	}
@@ -303,8 +333,18 @@ func ocrScannedPDF(filePath string) (string, error) {
 
 	var fullText strings.Builder
 	for idx, pageImg := range pageFiles {
-		ocrCmd := exec.Command("tesseract", pageImg, "stdout", "-l", "por+eng")
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+
+		// Per-page timeout (45 seconds per page) derived from context
+		pageCtx, pageCancel := context.WithTimeout(ctx, 45*time.Second)
+		ocrCmd := exec.CommandContext(pageCtx, "tesseract", pageImg, "stdout", "-l", "por+eng")
 		out, err := ocrCmd.Output()
+		pageCancel()
+
 		if err == nil {
 			pageText := strings.TrimSpace(string(out))
 			if pageText != "" {

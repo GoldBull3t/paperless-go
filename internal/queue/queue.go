@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -15,11 +16,12 @@ import (
 )
 
 type TaskPayload struct {
-	TaskID       string
-	TaskName     string
-	TaskFileName string
-	FilePath     string
-	Execute      func(taskID string) (int, error) // Returns related document ID and error
+	TaskID              string
+	TaskName            string
+	TaskFileName        string
+	FilePath            string
+	Execute             func(taskID string) (int, error) // Legacy fallback
+	ExecuteWithContext func(ctx context.Context, taskID string) (int, error)
 }
 
 type Broadcaster interface {
@@ -103,7 +105,7 @@ func (q *Queue) RecoverInterruptedTasks() int {
 		q.mu.RUnlock()
 
 		if !ok || it.attempts >= it.maxAttempts {
-			res := "Interrupted by server restart (exceeded max retries or handler missing)"
+			res := fmt.Sprintf("[DLQ] Interrupted by server restart (exceeded max retries %d/%d or handler missing)", it.attempts, it.maxAttempts)
 			_, _ = q.db.Exec("UPDATE tasks SET status = 'FAILURE', result = ?, date_done = CURRENT_TIMESTAMP WHERE task_id = ?", res, it.taskID)
 			continue
 		}
@@ -112,16 +114,16 @@ func (q *Queue) RecoverInterruptedTasks() int {
 		_, _ = q.db.Exec("UPDATE tasks SET status = 'PENDING', attempt_count = ? WHERE task_id = ?", newAttempts, it.taskID)
 
 		payloadStr := it.payloadJSON
-		exec := func(tID string) (int, error) {
-			return h(q.ctx, tID, payloadStr)
+		exec := func(ctx context.Context, tID string) (int, error) {
+			return h(ctx, tID, payloadStr)
 		}
 
 		select {
 		case q.taskChan <- TaskPayload{
-			TaskID:       it.taskID,
-			TaskName:     it.taskName,
-			TaskFileName: it.fileName,
-			Execute:      exec,
+			TaskID:              it.taskID,
+			TaskName:            it.taskName,
+			TaskFileName:        it.fileName,
+			ExecuteWithContext: exec,
 		}:
 			recoveredCount++
 			log.Printf("[Queue] Successfully recovered interrupted task %s (%s, attempt %d/%d)", it.taskID, it.taskName, newAttempts, it.maxAttempts)
@@ -163,23 +165,23 @@ func (q *Queue) EnqueuePersistent(taskType, taskName, fileName, filePath string,
 		q.broadcaster.BroadcastTaskUpdate(task)
 	}
 
-	exec := func(tID string) (int, error) {
+	exec := func(ctx context.Context, tID string) (int, error) {
 		q.mu.RLock()
 		h, ok := q.handlers[taskType]
 		q.mu.RUnlock()
 		if !ok {
 			return 0, fmt.Errorf("no registered handler for task type %s", taskType)
 		}
-		return h(q.ctx, tID, payloadJSON)
+		return h(ctx, tID, payloadJSON)
 	}
 
 	select {
 	case q.taskChan <- TaskPayload{
-		TaskID:       taskID,
-		TaskName:     taskName,
-		TaskFileName: fileName,
-		FilePath:     filePath,
-		Execute:      exec,
+		TaskID:              taskID,
+		TaskName:            taskName,
+		TaskFileName:        fileName,
+		FilePath:            filePath,
+		ExecuteWithContext: exec,
 	}:
 	case <-q.ctx.Done():
 		log.Printf("[WARN] Queue is shutting down; task %s dropped from memory channel", taskID)
@@ -270,7 +272,13 @@ func (q *Queue) processTask(p TaskPayload) {
 	resChan := make(chan taskResult, 1)
 
 	go func() {
-		docID, err := p.Execute(p.TaskID)
+		var docID int
+		var err error
+		if p.ExecuteWithContext != nil {
+			docID, err = p.ExecuteWithContext(taskCtx, p.TaskID)
+		} else if p.Execute != nil {
+			docID, err = p.Execute(p.TaskID)
+		}
 		resChan <- taskResult{docID: docID, err: err}
 	}()
 
@@ -292,45 +300,87 @@ func (q *Queue) processTask(p TaskPayload) {
 	now := time.Now()
 
 	if err != nil {
-		log.Printf("[Queue] Task %s failed: %v", p.TaskID, err)
-		errMsg := err.Error()
-		if docID > 0 {
-			docIDStr := strconv.Itoa(docID)
-			if _, dbErr := q.db.Exec(`
-				UPDATE tasks SET status = 'FAILURE', result = ?, date_done = CURRENT_TIMESTAMP, related_document_id = ? WHERE task_id = ?
-			`, errMsg, docID, p.TaskID); dbErr != nil {
-				log.Printf("[ERROR] Failed updating failed task %s in DB: %v", p.TaskID, dbErr)
-			}
-			if q.broadcaster != nil {
-				q.broadcaster.BroadcastTaskUpdate(models.Task{
-					TaskID:             p.TaskID,
-					Type:               "file_handling",
-					Status:             "FAILURE",
-					TaskName:           p.TaskName,
-					TaskFileName:       p.TaskFileName,
-					DateDone:           &now,
-					Result:             &errMsg,
-					RelatedDocument:    &docIDStr,
-					RelatedDocumentIDs: []int{docID},
-				})
-			}
-		} else {
-			if _, dbErr := q.db.Exec(`
-				UPDATE tasks SET status = 'FAILURE', result = ?, date_done = CURRENT_TIMESTAMP WHERE task_id = ?
-			`, errMsg, p.TaskID); dbErr != nil {
-				log.Printf("[ERROR] Failed updating failed task %s in DB: %v", p.TaskID, dbErr)
-			}
+		log.Printf("[Queue] Task %s execution failed: %v", p.TaskID, err)
+
+		var tType string
+		var attempts, maxAttempts int
+		var payloadJSON sql.NullString
+		_ = q.db.QueryRow(`SELECT type, attempt_count, max_attempts, payload_json FROM tasks WHERE task_id = ?`, p.TaskID).
+			Scan(&tType, &attempts, &maxAttempts, &payloadJSON)
+		if maxAttempts <= 0 {
+			maxAttempts = 3
+		}
+		attempts++
+
+		q.mu.RLock()
+		_, hasHandler := q.handlers[tType]
+		q.mu.RUnlock()
+
+		// Check if eligible for retry (persistent payload, registered handler, attempts remaining, queue not stopping)
+		if attempts < maxAttempts && hasHandler && payloadJSON.Valid && payloadJSON.String != "" && payloadJSON.String != "{}" && q.ctx.Err() == nil {
+			backoff := time.Duration(1<<uint(attempts-1)) * time.Second
+			retryMsg := fmt.Sprintf("Attempt %d/%d failed: %v. Retrying in %v...", attempts, maxAttempts, err, backoff)
+			_, _ = q.db.Exec(`UPDATE tasks SET status = 'PENDING', attempt_count = ?, result = ? WHERE task_id = ?`,
+				attempts, retryMsg, p.TaskID)
+			log.Printf("[Queue] Task %s failed (attempt %d/%d). Retrying in %v: %v", p.TaskID, attempts, maxAttempts, backoff, err)
+
 			if q.broadcaster != nil {
 				q.broadcaster.BroadcastTaskUpdate(models.Task{
 					TaskID:       p.TaskID,
 					Type:         "file_handling",
-					Status:       "FAILURE",
+					Status:       "PENDING",
 					TaskName:     p.TaskName,
 					TaskFileName: p.TaskFileName,
-					DateDone:     &now,
-					Result:       &errMsg,
+					Result:       &retryMsg,
 				})
 			}
+
+			go func(payload TaskPayload, delay time.Duration) {
+				select {
+				case <-time.After(delay):
+					select {
+					case q.taskChan <- payload:
+					case <-q.ctx.Done():
+					}
+				case <-q.ctx.Done():
+				}
+			}(p, backoff)
+			return
+		}
+
+		// Transition to Dead-Letter Queue (DLQ)
+		dlqMsg := fmt.Sprintf("[DLQ] Task permanently failed after %d/%d attempts: %v", attempts, maxAttempts, err)
+		log.Printf("[Queue] [DLQ] Task %s moved to Dead-Letter Queue: %v", p.TaskID, dlqMsg)
+
+		var relDocID any = nil
+		if docID > 0 {
+			relDocID = docID
+		}
+		if _, dbErr := q.db.Exec(`
+			UPDATE tasks SET status = 'FAILURE', result = ?, attempt_count = ?, date_done = CURRENT_TIMESTAMP, related_document_id = ? WHERE task_id = ?
+		`, dlqMsg, attempts, relDocID, p.TaskID); dbErr != nil {
+			log.Printf("[ERROR] Failed updating DLQ task %s in DB: %v", p.TaskID, dbErr)
+		}
+
+		if q.broadcaster != nil {
+			var docIDStr *string
+			var relDocIDs []int
+			if docID > 0 {
+				s := strconv.Itoa(docID)
+				docIDStr = &s
+				relDocIDs = []int{docID}
+			}
+			q.broadcaster.BroadcastTaskUpdate(models.Task{
+				TaskID:             p.TaskID,
+				Type:               "file_handling",
+				Status:             "FAILURE",
+				TaskName:           p.TaskName,
+				TaskFileName:       p.TaskFileName,
+				DateDone:           &now,
+				Result:             &dlqMsg,
+				RelatedDocument:    docIDStr,
+				RelatedDocumentIDs: relDocIDs,
+			})
 		}
 	} else {
 		log.Printf("[Queue] Task %s completed successfully. Document ID: %d", p.TaskID, docID)

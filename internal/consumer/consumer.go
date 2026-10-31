@@ -110,6 +110,14 @@ func (e *ErrDuplicateDocument) Error() string {
 }
 
 func (c *Consumer) ConsumeFile(srcPath, originalFileName string, opts *ConsumeOptions) (int, error) {
+	return c.ConsumeFileWithContext(context.Background(), srcPath, originalFileName, opts)
+}
+
+func (c *Consumer) ConsumeFileWithContext(ctx context.Context, srcPath, originalFileName string, opts *ConsumeOptions) (int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	// 1. Calculate SHA256 checksum
 	checksum, err := CalculateChecksum(srcPath)
 	if err != nil {
@@ -152,7 +160,7 @@ func (c *Consumer) ConsumeFile(srcPath, originalFileName string, opts *ConsumeOp
 	}
 
 	// 3. Extract text (supports PDF native, pdftotext, OCR multi-page, and Office OOXML)
-	content, _ := ExtractText(srcPath, mimeType)
+	content, _ := ExtractTextWithContext(ctx, srcPath, mimeType)
 
 	// 4. Determine Title
 	title := originalFileName
@@ -390,7 +398,7 @@ func (c *Consumer) ConsumeFile(srcPath, originalFileName string, opts *ConsumeOp
 
 	if strings.Contains(mimeType, "pdf") {
 		archiveFileName := fmt.Sprintf("%07d.pdf", docID)
-		if GenerateArchivePDF(destPath, archivePath) {
+		if GenerateArchivePDFWithContext(ctx, destPath, archivePath) {
 			if _, err := c.db.Exec("UPDATE documents SET archive_filename = ? WHERE id = ?", archiveFileName, docID); err != nil {
 				log.Printf("[ERROR] Failed updating archive_filename for doc %d: %v", docID, err)
 			}
@@ -583,9 +591,14 @@ func copyFile(src, dst string) error {
 	return crypto.AtomicCopy(src, dst)
 }
 
-// ConsumeFileWithFallback consumes a file and handles duplicate / failure preservation in consume directory
+// ConsumeFileWithFallback consumes a file and handles duplicate / failure preservation in consume directory (with background context)
 func (c *Consumer) ConsumeFileWithFallback(filePath, fileName, consumeDir string) (int, error) {
-	docID, err := c.ConsumeFile(filePath, fileName, nil)
+	return c.ConsumeFileWithFallbackContext(context.Background(), filePath, fileName, consumeDir)
+}
+
+// ConsumeFileWithFallbackContext consumes a file honoring context cancellation
+func (c *Consumer) ConsumeFileWithFallbackContext(ctx context.Context, filePath, fileName, consumeDir string) (int, error) {
+	docID, err := c.ConsumeFileWithContext(ctx, filePath, fileName, nil)
 	if err != nil {
 		var dupErr *ErrDuplicateDocument
 		if errors.As(err, &dupErr) {

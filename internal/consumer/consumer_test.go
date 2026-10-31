@@ -65,3 +65,4 @@ func TestConsumeFileWithFallback(t *testing.T) {
 		t.Errorf("expected duplicate file to be preserved in %s", dupFile)
 	}
 }
+

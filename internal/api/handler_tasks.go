@@ -1,4 +1,4 @@
-﻿package api
+package api
 
 import (
 	"crypto/rand"
@@ -43,6 +43,17 @@ func (h *TasksHandler) List(w http.ResponseWriter, r *http.Request) {
 		} else if ack == "true" || ack == "1" {
 			conditions = append(conditions, "acknowledged = 1")
 		}
+	}
+
+	if status := q.Get("status"); status != "" {
+		if strings.ToLower(status) == "dlq" || strings.ToLower(status) == "dead_letter" {
+			conditions = append(conditions, "(status = 'FAILURE' AND result LIKE '%[DLQ]%')")
+		} else {
+			conditions = append(conditions, "status = ?")
+			args = append(args, strings.ToUpper(status))
+		}
+	} else if q.Get("is_dlq") == "true" {
+		conditions = append(conditions, "(status = 'FAILURE' AND result LIKE '%[DLQ]%')")
 	}
 
 	whereClause := ""
@@ -139,11 +150,15 @@ func (h *TasksHandler) StatusCounts(w http.ResponseWriter, r *http.Request) {
 	_ = h.db.QueryRow("SELECT COUNT(*) FROM tasks WHERE acknowledged = 0 AND status IN ('PENDING', 'STARTED')").Scan(&inProgress)
 	_ = h.db.QueryRow("SELECT COUNT(*) FROM tasks WHERE acknowledged = 0 AND status = 'SUCCESS'").Scan(&completed)
 
+	var deadLetter int
+	_ = h.db.QueryRow("SELECT COUNT(*) FROM tasks WHERE status = 'FAILURE' AND result LIKE '%[DLQ]%'").Scan(&deadLetter)
+
 	resp := map[string]int{
 		"all":             all,
 		"needs_attention": needsAttention,
 		"in_progress":     inProgress,
 		"completed":       completed,
+		"dead_letter":     deadLetter,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

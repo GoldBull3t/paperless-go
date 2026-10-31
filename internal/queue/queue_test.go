@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -155,5 +156,63 @@ func TestQueue_PersistentTaskRecovery(t *testing.T) {
 	}
 	if status != "SUCCESS" {
 		t.Fatalf("expected task status SUCCESS after recovery, got %s", status)
+	}
+}
+
+func TestQueue_DeadLetterQueue_RetriesAndDLQ(t *testing.T) {
+	q, db, tmpDir := setupTestQueue(t, 2)
+	defer os.RemoveAll(tmpDir)
+	defer db.Close()
+	defer q.Close()
+
+	var attemptCount int
+	var mu sync.Mutex
+	allAttemptsDone := make(chan struct{})
+
+	q.RegisterHandler("failing_job", func(ctx context.Context, taskID, payloadJSON string) (int, error) {
+		mu.Lock()
+		attemptCount++
+		current := attemptCount
+		mu.Unlock()
+
+		if current >= 3 {
+			select {
+			case <-allAttemptsDone:
+			default:
+				close(allAttemptsDone)
+			}
+		}
+		return 0, errors.New("persistent hardware failure simulation")
+	})
+
+	taskID, err := q.EnqueuePersistent("failing_job", "Failing DLQ Task", "fail.pdf", "/tmp/fail.pdf", map[string]string{"sample": "data"})
+	if err != nil {
+		t.Fatalf("failed to enqueue persistent task: %v", err)
+	}
+
+	select {
+	case <-allAttemptsDone:
+	case <-time.After(8 * time.Second):
+		t.Fatalf("timed out waiting for 3 retries of task %s (attemptCount=%d)", taskID, attemptCount)
+	}
+
+	// Give a moment for final DB update
+	time.Sleep(100 * time.Millisecond)
+
+	var status, result string
+	var attempts int
+	err = db.QueryRow("SELECT status, result, attempt_count FROM tasks WHERE task_id = ?", taskID).Scan(&status, &result, &attempts)
+	if err != nil {
+		t.Fatalf("failed querying task from DB: %v", err)
+	}
+
+	if status != "FAILURE" {
+		t.Errorf("expected final status FAILURE, got %s", status)
+	}
+	if attempts < 3 {
+		t.Errorf("expected at least 3 attempts, got %d", attempts)
+	}
+	if !strings.Contains(result, "[DLQ]") {
+		t.Errorf("expected result to contain '[DLQ]', got: %s", result)
 	}
 }
