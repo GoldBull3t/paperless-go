@@ -166,3 +166,4 @@ func TestNetworkScannersAPI_CRUDAndTriggerScan(t *testing.T) {
 		t.Errorf("Expected 204 No Content from DeleteScanner, got %d", wDel.Code)
 	}
 }
+

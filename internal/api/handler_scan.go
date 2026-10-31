@@ -423,18 +423,45 @@ func (h *ScanHandler) ScanPage(w http.ResponseWriter, r *http.Request) {
 		</a>
 	</header>
 
-	<main class="container py-4" style="max-width: 640px;">
+	<main class="container py-4" style="max-width: 680px;">
 		<div class="card-scan">
-			<h2 class="h4 mb-3">eSCL Driverless Network Scanner</h2>
-			<p class="text-muted small mb-4">Directly scan from network multifunction printers using open eSCL 2.0 standard protocol and ingest documents automatically into Paperless.</p>
+			<div class="d-flex align-items-center justify-content-between mb-3">
+				<div>
+					<h2 class="h4 mb-1">eSCL Driverless Network Scanner</h2>
+					<p class="text-muted small mb-0">Directly scan from network multifunction printers using open eSCL 2.0 standard protocol.</p>
+				</div>
+				<button type="button" class="btn btn-outline-secondary btn-sm" id="btnToggleAddScanner">
+					+ Register Scanner
+				</button>
+			</div>
+
+			<!-- Add Scanner Inline Panel -->
+			<div class="card p-3 mb-4 border-dashed" id="addScannerCard" style="display:none; background:rgba(0,0,0,0.02);">
+				<div class="d-flex align-items-center justify-content-between mb-2">
+					<h6 class="mb-0 fw-bold">Register Network Scanner</h6>
+					<button type="button" class="btn-close btn-sm" id="btnCloseAddScanner"></button>
+				</div>
+				<p class="small text-muted mb-3">Enter the IP or hostname of an eSCL / PWG compatible network scanner or printer.</p>
+				<div class="row g-2 mb-2">
+					<div class="col-sm-5">
+						<input type="text" class="form-control form-control-sm" id="newScannerName" placeholder="Scanner Name (Optional)">
+					</div>
+					<div class="col-sm-7">
+						<input type="url" class="form-control form-control-sm" id="newScannerUrl" placeholder="http://192.168.1.100:8080/eSCL" required>
+					</div>
+				</div>
+				<button type="button" class="btn btn-primary btn-sm" id="btnSaveScanner">Test &amp; Save Scanner</button>
+			</div>
 
 			<form id="scanForm">
 				<div class="mb-3">
-					<label class="form-label fw-semibold" for="scannerUrl">Scanner Endpoint</label>
-					<div class="input-group">
-						<input type="url" class="form-control" id="scannerUrl" placeholder="http://192.168.1.100:8080/eSCL" required value="http://localhost:8080/eSCL">
-						<button type="button" class="btn btn-outline-secondary" id="testBtn">Test Connection</button>
+					<div class="d-flex justify-content-between align-items-center mb-1">
+						<label class="form-label fw-semibold mb-0" for="scannerSelect">Select Scanner</label>
+						<span id="adfSensorBadge" class="scanner-badge bg-secondary text-white" style="display:none;">Feeder Ready</span>
 					</div>
+					<select class="form-select" id="scannerSelect" required>
+						<option value="" disabled selected>Loading registered scanners...</option>
+					</select>
 					<div id="scannerStatus" class="mt-2" style="display:none;"></div>
 				</div>
 
@@ -461,7 +488,7 @@ func (h *ScanHandler) ScanPage(w http.ResponseWriter, r *http.Request) {
 					</div>
 				</div>
 
-				<div class="row g-3 mb-4">
+				<div class="row g-3 mb-3">
 					<div class="col-sm-6">
 						<label class="form-label fw-semibold" for="scanRes">Resolution</label>
 						<select class="form-select" id="scanRes">
@@ -477,6 +504,11 @@ func (h *ScanHandler) ScanPage(w http.ResponseWriter, r *http.Request) {
 							<option value="image/jpeg">JPEG Image</option>
 						</select>
 					</div>
+				</div>
+
+				<div class="form-check form-switch mb-4" id="duplexSwitchContainer" style="display:none;">
+					<input class="form-check-input" type="checkbox" id="scanDuplex">
+					<label class="form-check-label fw-semibold" for="scanDuplex">2-Sided Duplex Scan (Both sides)</label>
 				</div>
 
 				<button type="submit" class="btn btn-primary w-100 py-2 fs-6 d-flex align-items-center justify-content-center gap-2" id="startScanBtn">
@@ -508,25 +540,118 @@ func (h *ScanHandler) ScanPage(w http.ResponseWriter, r *http.Request) {
 		const dateStr = now.toISOString().replace(/[-:T]/g, '').slice(0, 14);
 		document.getElementById('docName').value = 'Scan_' + dateStr + '.pdf';
 
-		const testBtn = document.getElementById('testBtn');
-		const scannerStatus = document.getElementById('scannerStatus');
+		let loadedScanners = [];
+		const scannerSelect = document.getElementById('scannerSelect');
+		const adfSensorBadge = document.getElementById('adfSensorBadge');
+		const scanSource = document.getElementById('scanSource');
+		const duplexContainer = document.getElementById('duplexSwitchContainer');
 
-		testBtn.addEventListener('click', async () => {
-			const url = document.getElementById('scannerUrl').value.trim();
-			if (!url) return;
-			scannerStatus.style.display = 'block';
-			scannerStatus.innerHTML = '<span class="text-muted small">Testing connection...</span>';
+		// Toggle duplex switch visibility based on Feeder source
+		scanSource.addEventListener('change', () => {
+			if (scanSource.value === 'Feeder') {
+				duplexContainer.style.display = 'block';
+			} else {
+				duplexContainer.style.display = 'none';
+				document.getElementById('scanDuplex').checked = false;
+			}
+		});
+
+		// Fetch Scanners from API
+		async function loadScanners() {
 			try {
-				const res = await fetch('/api/scan/scanners/test/', {
+				const res = await fetch('/api/scanners/');
+				if (!res.ok) throw new Error('Failed to load scanners');
+				loadedScanners = await res.json();
+				scannerSelect.innerHTML = '';
+
+				if (loadedScanners.length === 0) {
+					// Fallback to legacy endpoint if none
+					const legRes = await fetch('/api/scan/scanners/');
+					loadedScanners = await legRes.json();
+				}
+
+				loadedScanners.forEach((s, idx) => {
+					const opt = document.createElement('option');
+					opt.value = s.id || idx;
+					opt.dataset.url = s.url;
+					opt.dataset.id = s.id || 0;
+					opt.textContent = (s.name || s.make_and_model || 'eSCL Scanner') + ' (' + s.url + ')';
+					scannerSelect.appendChild(opt);
+				});
+
+				if (loadedScanners.length > 0) {
+					onScannerSelected();
+				}
+			} catch (e) {
+				console.error(e);
+				scannerSelect.innerHTML = '<option value="">No scanners found. Register one above.</option>';
+			}
+		}
+
+		async function onScannerSelected() {
+			const sel = scannerSelect.options[scannerSelect.selectedIndex];
+			if (!sel) return;
+			const scId = sel.dataset.id;
+			if (scId && parseInt(scId, 10) > 0) {
+				try {
+					const res = await fetch('/api/scanners/' + scId + '/');
+					if (res.ok) {
+						const details = await res.json();
+						if (details.adf_state === 'ScannerAdfLoaded') {
+							adfSensorBadge.textContent = 'Feeder Loaded';
+							adfSensorBadge.className = 'scanner-badge bg-success text-white';
+							adfSensorBadge.style.display = 'inline-block';
+							scanSource.value = 'Feeder';
+							duplexContainer.style.display = 'block';
+						} else if (details.adf_state === 'ScannerAdfEmpty') {
+							adfSensorBadge.textContent = 'Feeder Empty';
+							adfSensorBadge.className = 'scanner-badge bg-warning text-dark';
+							adfSensorBadge.style.display = 'inline-block';
+						} else {
+							adfSensorBadge.style.display = 'none';
+						}
+					}
+				} catch (err) {
+					console.error(err);
+				}
+			}
+		}
+
+		scannerSelect.addEventListener('change', onScannerSelected);
+
+		// Add Scanner Toggle
+		const addScannerCard = document.getElementById('addScannerCard');
+		document.getElementById('btnToggleAddScanner').addEventListener('click', () => {
+			addScannerCard.style.display = addScannerCard.style.display === 'none' ? 'block' : 'none';
+		});
+		document.getElementById('btnCloseAddScanner').addEventListener('click', () => {
+			addScannerCard.style.display = 'none';
+		});
+
+		// Save Scanner
+		document.getElementById('btnSaveScanner').addEventListener('click', async () => {
+			const name = document.getElementById('newScannerName').value.trim();
+			const url = document.getElementById('newScannerUrl').value.trim();
+			if (!url) {
+				alert('Please enter a scanner URL');
+				return;
+			}
+			try {
+				const res = await fetch('/api/scanners/', {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ scanner_url: url })
+					body: JSON.stringify({ name: name, url: url })
 				});
-				if (!res.ok) throw new Error(await res.text());
-				const data = await res.json();
-				scannerStatus.innerHTML = '<div class="alert alert-success py-2 small mb-0">Connected: <strong>' + (data.make_and_model || data.name || 'eSCL Scanner') + '</strong> (' + (data.status || 'Ready') + ')</div>';
+				if (!res.ok) {
+					const errText = await res.text();
+					throw new Error(errText);
+				}
+				addScannerCard.style.display = 'none';
+				document.getElementById('newScannerName').value = '';
+				document.getElementById('newScannerUrl').value = '';
+				await loadScanners();
 			} catch (e) {
-				scannerStatus.innerHTML = '<div class="alert alert-danger py-2 small mb-0">Error: ' + e.message + '</div>';
+				alert('Error registering scanner: ' + e.message);
 			}
 		});
 
@@ -541,6 +666,9 @@ func (h *ScanHandler) ScanPage(w http.ResponseWriter, r *http.Request) {
 
 		form.addEventListener('submit', async (e) => {
 			e.preventDefault();
+			const sel = scannerSelect.options[scannerSelect.selectedIndex];
+			if (!sel) return;
+
 			startBtn.disabled = true;
 			startText.textContent = 'Scanning in progress...';
 			progressContainer.style.display = 'block';
@@ -551,12 +679,14 @@ func (h *ScanHandler) ScanPage(w http.ResponseWriter, r *http.Request) {
 			progressStatus.textContent = 'Acquiring pages from scanner...';
 
 			const payload = {
-				scanner_url: document.getElementById('scannerUrl').value.trim(),
+				scanner_id: parseInt(sel.dataset.id || '0', 10),
+				scanner_url: sel.dataset.url || '',
 				name: document.getElementById('docName').value.trim(),
 				source: document.getElementById('scanSource').value,
 				color_mode: document.getElementById('colorMode').value,
 				resolution: parseInt(document.getElementById('scanRes').value, 10),
-				format: document.getElementById('scanFormat').value
+				format: document.getElementById('scanFormat').value,
+				duplex: document.getElementById('scanDuplex').checked
 			};
 
 			try {
@@ -607,6 +737,16 @@ func (h *ScanHandler) ScanPage(w http.ResponseWriter, r *http.Request) {
 
 			} catch (err) {
 				startBtn.disabled = false;
+				startText.textContent = 'Start Scan & Ingest';
+				progressContainer.style.display = 'none';
+				resultContainer.style.display = 'block';
+				resultContainer.innerHTML = '<div class="alert alert-danger p-3">Failed initiating scan: ' + err.message + '</div>';
+			}
+		});
+
+		// Init scanners
+		loadScanners();
+	</script>
 				startText.textContent = 'Start Scan & Ingest';
 				progressContainer.style.display = 'none';
 				resultContainer.style.display = 'block';

@@ -414,6 +414,12 @@ func NewRouter(
 	r.Get("/{lang:[a-z]{2}-[A-Z]{2}}/scan", scanH.ScanPage)
 	r.Get("/{lang:[a-z]{2}-[A-Z]{2}}/scan/", scanH.ScanPage)
 
+	// Cryptographic Vault Web Portal (UI Feature)
+	r.Get("/vault", vaultH.VaultPage)
+	r.Get("/vault/", vaultH.VaultPage)
+	r.Get("/{lang:[a-z]{2}-[A-Z]{2}}/vault", vaultH.VaultPage)
+	r.Get("/{lang:[a-z]{2}-[A-Z]{2}}/vault/", vaultH.VaultPage)
+
 	// Public share links (Feature #3)
 	r.Get("/share/{slug}", shareLinksH.PublicAccess)
 	r.Get("/{lang:[a-z]{2}-[A-Z]{2}}/share/{slug}", shareLinksH.PublicAccess)

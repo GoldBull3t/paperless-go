@@ -1,4 +1,4 @@
-﻿package api
+package api
 
 import (
 	"encoding/json"
@@ -533,6 +533,16 @@ func (h *AuthHandler) renderLoginForm(w http.ResponseWriter, errorMsg, next stri
 		</div>
 
 		%s
+
+		<footer class="mt-4 pt-3 text-center border-top" style="border-color: var(--border-color) !important;">
+			<div class="d-flex justify-content-center gap-3 small text-muted">
+				<a href="/scan" class="text-decoration-none text-muted">eSCL Scanner</a>
+				<span>&bull;</span>
+				<a href="/vault" class="text-decoration-none text-muted">Security Vault</a>
+				<span>&bull;</span>
+				<a href="/api/schema/view/" class="text-decoration-none text-muted">API Docs</a>
+			</div>
+		</footer>
 	</main>
 
 	<script>
