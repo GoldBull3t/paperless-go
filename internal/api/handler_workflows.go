@@ -1,4 +1,4 @@
-﻿package api
+package api
 
 import (
 	"database/sql"
@@ -9,14 +9,19 @@ import (
 	"github.com/go-chi/chi/v5"
 	"paperless-go/internal/database"
 	"paperless-go/internal/models"
+	"paperless-go/internal/workflow"
 )
 
 type WorkflowsHandler struct {
-	db *database.DB
+	db     *database.DB
+	engine *workflow.Engine
 }
 
 func NewWorkflowsHandler(db *database.DB) *WorkflowsHandler {
-	return &WorkflowsHandler{db: db}
+	return &WorkflowsHandler{
+		db:     db,
+		engine: workflow.NewEngine(db),
+	}
 }
 
 func (h *WorkflowsHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -202,6 +207,106 @@ func (h *WorkflowsHandler) fetchWorkflow(id int) (*models.Workflow, error) {
 	}
 
 	return &wf, nil
+}
+
+func (h *WorkflowsHandler) RunWorkflow(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	if id <= 0 {
+		http.Error(w, `{"detail": "Invalid workflow ID"}`, http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		Documents []int `json:"documents"`
+		Force     bool  `json:"force"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	docIDs := req.Documents
+	if len(docIDs) == 0 {
+		rows, err := h.db.Query("SELECT id FROM documents WHERE deleted_at IS NULL ORDER BY id ASC")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var did int
+				if err := rows.Scan(&did); err == nil {
+					docIDs = append(docIDs, did)
+				}
+			}
+		}
+	}
+
+	processed := 0
+	modified := 0
+
+	for _, did := range docIDs {
+		doc, err := h.engine.FetchDocument(did)
+		if err != nil {
+			continue
+		}
+		processed++
+		changed, err := h.engine.ExecuteWorkflowByID(id, doc, req.Force)
+		if err == nil && changed {
+			modified++
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"workflow_id": id,
+		"processed":   processed,
+		"modified":    modified,
+		"detail":      "Workflow execution completed",
+	})
+}
+
+func (h *WorkflowsHandler) RunAllWorkflows(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Documents []int `json:"documents"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	docIDs := req.Documents
+	if len(docIDs) == 0 {
+		rows, err := h.db.Query("SELECT id FROM documents WHERE deleted_at IS NULL ORDER BY id ASC")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var did int
+				if err := rows.Scan(&did); err == nil {
+					docIDs = append(docIDs, did)
+				}
+			}
+		}
+	}
+
+	processed := 0
+	modified := 0
+
+	for _, did := range docIDs {
+		doc, err := h.engine.FetchDocument(did)
+		if err != nil {
+			continue
+		}
+		processed++
+		initialTitle := doc.Title
+		initialTagsCount := len(doc.Tags)
+		initialCorr := doc.Correspondent
+
+		err = h.engine.ExecuteWorkflows(doc, workflow.TriggerDocumentUpdated, workflow.SourceWebUI)
+		if err == nil {
+			if doc.Title != initialTitle || len(doc.Tags) != initialTagsCount || doc.Correspondent != initialCorr {
+				modified++
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"processed": processed,
+		"modified":  modified,
+		"detail":    "Workflows execution completed",
+	})
 }
 
 // Workflow Triggers CRUD (/api/workflow_triggers/)

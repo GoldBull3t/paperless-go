@@ -17,6 +17,7 @@ import (
 	"paperless-go/internal/compress"
 	"paperless-go/internal/consumer"
 	"paperless-go/internal/models"
+	"paperless-go/internal/workflow"
 )
 
 // BulkDownload handles POST /api/documents/bulk_download/
@@ -441,6 +442,12 @@ func (h *DocumentsHandler) BulkEdit(w http.ResponseWriter, r *http.Request) {
 
 	if payload.Method == "delete" && h.wsHub != nil {
 		h.wsHub.BroadcastDocumentsDeleted()
+	}
+
+	if payload.Method == "reprocess" && h.consumer != nil && h.consumer.GetWorkflowEngine() != nil {
+		for _, id := range payload.Documents {
+			_, _ = h.consumer.GetWorkflowEngine().ExecuteWorkflowsOnDocumentID(id, workflow.TriggerDocumentUpdated, workflow.SourceWebUI)
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")

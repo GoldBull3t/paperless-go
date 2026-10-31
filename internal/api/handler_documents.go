@@ -857,10 +857,17 @@ func (h *DocumentsHandler) ReprocessDocuments(w http.ResponseWriter, r *http.Req
 				h.queue.Enqueue(fmt.Sprintf("Reprocess document %d", docID), origName, filePath, func(tid string) (int, error) {
 					text, _ := consumer.ExtractText(filePath, mimeType)
 					if text != "" {
-						_, _ = h.db.Exec("UPDATE documents SET content = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", text, docID)
+						compressed := compress.CompressText(text)
+						_, _ = h.db.Exec("UPDATE documents SET content = ?, modified = CURRENT_TIMESTAMP WHERE id = ?", compressed, docID)
+						_, _ = h.db.Exec("INSERT OR REPLACE INTO documents_fts (rowid, title, content) VALUES (?, (SELECT title FROM documents WHERE id = ?), ?)", docID, docID, text)
 					}
 					thumbPath := filepath.Join(h.cfg.MediaDir, "documents", "thumbnails", fmt.Sprintf("%07d.png", docID))
 					_ = consumer.GenerateThumbnail(filePath, thumbPath, mimeType)
+
+					if h.consumer != nil && h.consumer.GetWorkflowEngine() != nil {
+						_, _ = h.consumer.GetWorkflowEngine().ExecuteWorkflowsOnDocumentID(docID, workflow.TriggerDocumentUpdated, workflow.SourceWebUI)
+					}
+
 					return docID, nil
 				})
 			}

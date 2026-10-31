@@ -9,7 +9,6 @@ import (
 	"mime"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -331,6 +330,7 @@ func (c *Consumer) ConsumeFileWithContext(ctx context.Context, srcPath, original
 	docObj := &models.Document{
 		ID:               docID,
 		Title:            title,
+		Content:          content,
 		OriginalFileName: originalFileName,
 		Correspondent:    correspondentID,
 		DocumentType:     documentTypeID,
@@ -519,58 +519,11 @@ func (c *Consumer) matchStoragePath(content, title string) *int {
 }
 
 func MatchesRule(content, title, match string, algo int, insensitive bool) bool {
-	return matchesRule(content, title, match, algo, insensitive)
+	return workflow.MatchesRule(content, title, match, algo, insensitive)
 }
 
 func matchesRule(content, title, match string, algo int, insensitive bool) bool {
-	if strings.TrimSpace(match) == "" {
-		return false
-	}
-	text := content + " " + title
-	if insensitive {
-		text = strings.ToLower(text)
-		match = strings.ToLower(match)
-	}
-
-	switch algo {
-	case 1: // Any word
-		words := strings.Fields(match)
-		for _, w := range words {
-			if strings.Contains(text, w) {
-				return true
-			}
-		}
-		return false
-	case 2: // All words
-		words := strings.Fields(match)
-		if len(words) == 0 {
-			return false
-		}
-		for _, w := range words {
-			if !strings.Contains(text, w) {
-				return false
-			}
-		}
-		return true
-	case 3: // Exact match
-		return strings.Contains(text, match)
-	case 4: // Regular expression
-		expr := match
-		if insensitive && !strings.HasPrefix(expr, "(?i)") {
-			expr = "(?i)" + expr
-		}
-		re, err := regexp.Compile(expr)
-		if err == nil {
-			return re.MatchString(text)
-		}
-	case 5: // Fuzzy match
-		// Check if normalized match substring is roughly matched
-		cleanMatch := strings.TrimSpace(match)
-		if len(cleanMatch) > 0 && strings.Contains(text, cleanMatch) {
-			return true
-		}
-	}
-	return false
+	return workflow.MatchesRule(content, title, match, algo, insensitive)
 }
 
 func CalculateChecksum(path string) (string, error) {

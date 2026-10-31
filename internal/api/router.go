@@ -303,10 +303,12 @@ func NewRouter(
 			r.Route("/workflows", func(r chi.Router) {
 				r.Get("/", workflowsH.List)
 				r.Post("/", workflowsH.Create)
+				r.Post("/run/", workflowsH.RunAllWorkflows)
 				r.Get("/{id}/", workflowsH.Get)
 				r.Put("/{id}/", workflowsH.Update)
 				r.Patch("/{id}/", workflowsH.Update)
 				r.Delete("/{id}/", workflowsH.Delete)
+				r.Post("/{id}/run/", workflowsH.RunWorkflow)
 			})
 			r.Route("/workflow_triggers", func(r chi.Router) {
 				r.Get("/", workflowsH.ListTriggers)
