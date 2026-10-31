@@ -54,6 +54,12 @@ type Config struct {
 	OIDCUserInfoURL  string
 	OIDCRedirectURI  string
 	OIDCAutoCreate   bool
+
+	// Barcode & Batch Separation Configuration (Feature #8B)
+	EnableBarcodes   bool
+	BarcodeSeparator string
+	BarcodeEnableASN bool
+	BarcodeASNPrefix string
 }
 
 func Load() *Config {
@@ -162,6 +168,10 @@ func Load() *Config {
 		OIDCUserInfoURL:    oidcUserInfoURL,
 		OIDCRedirectURI:    oidcRedirectURI,
 		OIDCAutoCreate:     oidcAutoCreate,
+		EnableBarcodes:     getEnv("PAPERLESS_CONSUMER_ENABLE_BARCODES", "true") == "true",
+		BarcodeSeparator:   getEnv("PAPERLESS_CONSUMER_BARCODE_STRING", "PATCHT"),
+		BarcodeEnableASN:   getEnv("PAPERLESS_CONSUMER_ENABLE_ASN_BARCODE", "true") == "true",
+		BarcodeASNPrefix:   getEnv("PAPERLESS_CONSUMER_ASN_BARCODE_PREFIX", "ASN"),
 	}
 }
 

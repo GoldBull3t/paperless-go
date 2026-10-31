@@ -5,6 +5,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"mime"
 	"os"
@@ -17,6 +20,7 @@ import (
 	"log"
 
 	"paperless-go/internal/ai"
+	"paperless-go/internal/barcode"
 	"paperless-go/internal/classifier"
 	"paperless-go/internal/compress"
 	"paperless-go/internal/config"
@@ -27,13 +31,14 @@ import (
 )
 
 type Consumer struct {
-	db         *database.DB
-	cfg        *config.Config
-	clf        *classifier.Classifier
-	wfEngine   *workflow.Engine
-	aiProvider ai.Provider
-	ragSvc     *ai.RAGService
-	extractor  *ai.ExtractorService
+	db             *database.DB
+	cfg            *config.Config
+	clf            *classifier.Classifier
+	wfEngine       *workflow.Engine
+	barcodeScanner *barcode.Scanner
+	aiProvider     ai.Provider
+	ragSvc         *ai.RAGService
+	extractor      *ai.ExtractorService
 }
 
 func NewConsumer(db *database.DB, cfg *config.Config) *Consumer {
@@ -42,6 +47,17 @@ func NewConsumer(db *database.DB, cfg *config.Config) *Consumer {
 		cfg:      cfg,
 		clf:      classifier.NewClassifier(db),
 		wfEngine: workflow.NewEngine(db),
+	}
+
+	if cfg != nil {
+		barcodeCfg := barcode.Config{
+			Enabled:             cfg.EnableBarcodes,
+			SeparatorString:     cfg.BarcodeSeparator,
+			EnableASN:           cfg.BarcodeEnableASN,
+			ASNPrefix:           cfg.BarcodeASNPrefix,
+			RemoveSeparatorPage: true,
+		}
+		c.barcodeScanner = barcode.NewScanner(barcodeCfg)
 	}
 
 	if cfg.AIEnabled {
@@ -158,6 +174,42 @@ func (c *Consumer) ConsumeFileWithContext(ctx context.Context, srcPath, original
 		}
 	}
 
+	// 2.5 Batch Splitting via Barcodes / Patch-Code
+	if ext == ".pdf" && c.cfg != nil && c.cfg.EnableBarcodes && c.barcodeScanner != nil {
+		slices, err := c.barcodeScanner.SplitPDFByBarcodes(ctx, srcPath, filepath.Dir(srcPath))
+		if err == nil && len(slices) > 1 {
+			log.Printf("[Consumer] Batch document %q split into %d separate documents via barcode/patch-code", originalFileName, len(slices))
+			var firstID int
+			for i, sl := range slices {
+				sliceOpts := &ConsumeOptions{}
+				if opts != nil {
+					*sliceOpts = *opts
+				}
+				if sl.ASN != nil {
+					sliceOpts.ArchiveSerialNumber = sl.ASN
+				}
+				if sl.Title != "" {
+					sliceOpts.Title = sl.Title
+				}
+				for _, tName := range sl.Tags {
+					var tagID int
+					if err := c.db.QueryRow("SELECT id FROM tags WHERE LOWER(name) = LOWER(?)", tName).Scan(&tagID); err == nil {
+						sliceOpts.Tags = append(sliceOpts.Tags, tagID)
+					}
+				}
+				partName := fmt.Sprintf("%s_part%d.pdf", strings.TrimSuffix(originalFileName, ext), i+1)
+				if sl.Title != "" {
+					partName = sl.Title + ".pdf"
+				}
+				subID, err := c.ConsumeFileWithContext(ctx, sl.FilePath, partName, sliceOpts)
+				if err == nil && firstID == 0 {
+					firstID = subID
+				}
+			}
+			return firstID, nil
+		}
+	}
+
 	// 3. Extract text (supports PDF native, pdftotext, OCR multi-page, and Office OOXML)
 	content, _ := ExtractTextWithContext(ctx, srcPath, mimeType)
 
@@ -194,6 +246,30 @@ func (c *Consumer) ConsumeFileWithContext(ctx context.Context, srcPath, original
 		ownerID = opts.Owner
 		for _, t := range opts.Tags {
 			matchedTags[t] = true
+		}
+	}
+
+	// Barcode inspection on single image documents
+	if strings.HasPrefix(mimeType, "image/") && c.cfg != nil && c.cfg.EnableBarcodes && c.barcodeScanner != nil {
+		if f, err := os.Open(srcPath); err == nil {
+			if img, _, err := image.Decode(f); err == nil {
+				bcs, _ := c.barcodeScanner.ScanImage(img, 1)
+				for _, b := range bcs {
+					if archiveSerialNumber == nil && b.ASN != nil {
+						archiveSerialNumber = b.ASN
+					}
+					if title == strings.TrimSuffix(originalFileName, ext) && b.Title != "" {
+						title = b.Title
+					}
+					for _, tName := range b.Tags {
+						var tagID int
+						if err := c.db.QueryRow("SELECT id FROM tags WHERE LOWER(name) = LOWER(?)", tName).Scan(&tagID); err == nil {
+							matchedTags[tagID] = true
+						}
+					}
+				}
+			}
+			_ = f.Close()
 		}
 	}
 

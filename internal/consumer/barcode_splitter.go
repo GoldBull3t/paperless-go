@@ -1,10 +1,13 @@
-﻿package consumer
+package consumer
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+
+	"paperless-go/internal/barcode"
 )
 
 // SplitDocumentSegment represents a partitioned document chunk created by a separator
@@ -34,6 +37,29 @@ func (s *BarcodeSplitter) SplitPDFBySeparators(pdfPath string, sepString string,
 		return nil, false, nil
 	}
 
+	// 1. Try visual barcode & patch-code scanning via internal/barcode
+	scanner := barcode.NewScanner(barcode.Config{
+		Enabled:             true,
+		SeparatorString:     sepString,
+		EnableASN:           true,
+		ASNPrefix:           asnPrefix,
+		RemoveSeparatorPage: true,
+	})
+
+	if visualSlices, err := scanner.SplitPDFByBarcodes(context.Background(), pdfPath, filepath.Dir(pdfPath)); err == nil && len(visualSlices) > 1 {
+		var segments []SplitDocumentSegment
+		for _, sl := range visualSlices {
+			segments = append(segments, SplitDocumentSegment{
+				FilePath:  sl.FilePath,
+				StartPage: sl.StartPage,
+				EndPage:   sl.EndPage,
+				ASN:       sl.ASN,
+			})
+		}
+		return segments, true, nil
+	}
+
+	// 2. Fallback to textual separator matching in embedded PDF text
 	var separatorPages []int
 	pageASNs := make(map[int]*int)
 
