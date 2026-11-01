@@ -10,16 +10,23 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"paperless-go/internal/config"
+	"paperless-go/internal/crypto"
 	"paperless-go/internal/database"
 	"paperless-go/internal/models"
 )
 
 type MailHandler struct {
-	db *database.DB
+	db  *database.DB
+	cfg *config.Config
 }
 
-func NewMailHandler(db *database.DB) *MailHandler {
-	return &MailHandler{db: db}
+func NewMailHandler(db *database.DB, cfg ...*config.Config) *MailHandler {
+	mh := &MailHandler{db: db}
+	if len(cfg) > 0 {
+		mh.cfg = cfg[0]
+	}
+	return mh
 }
 
 // Mail Accounts (/api/mail_accounts/)
@@ -149,10 +156,17 @@ func (h *MailHandler) CreateAccount(w http.ResponseWriter, r *http.Request) {
 		input.AccountType = 1
 	}
 
+	pwdToStore := input.Password
+	if h.cfg != nil && h.cfg.SecretKey != "" && pwdToStore != "" {
+		if enc, err := crypto.EncryptString(pwdToStore, h.cfg.SecretKey); err == nil {
+			pwdToStore = enc
+		}
+	}
+
 	res, err := h.db.Exec(`
 		INSERT INTO mail_accounts (name, imap_server, imap_port, imap_security, username, password, character_set, is_token, account_type, owner_id)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, input.Name, input.ImapServer, input.ImapPort, input.ImapSecurity, input.Username, input.Password, input.CharacterSet, input.IsToken, input.AccountType, input.Owner)
+	`, input.Name, input.ImapServer, input.ImapPort, input.ImapSecurity, input.Username, pwdToStore, input.CharacterSet, input.IsToken, input.AccountType, input.Owner)
 	if err != nil {
 		http.Error(w, "Account name already exists or database error: "+err.Error(), http.StatusBadRequest)
 		return
@@ -224,7 +238,13 @@ func (h *MailHandler) UpdateAccount(w http.ResponseWriter, r *http.Request) {
 		_, _ = h.db.Exec("UPDATE mail_accounts SET username = ? WHERE id = ?", *input.Username, id)
 	}
 	if input.Password != nil && strings.Trim(*input.Password, "*") != "" {
-		_, _ = h.db.Exec("UPDATE mail_accounts SET password = ? WHERE id = ?", *input.Password, id)
+		pwdToStore := *input.Password
+		if h.cfg != nil && h.cfg.SecretKey != "" {
+			if enc, err := crypto.EncryptString(pwdToStore, h.cfg.SecretKey); err == nil {
+				pwdToStore = enc
+			}
+		}
+		_, _ = h.db.Exec("UPDATE mail_accounts SET password = ? WHERE id = ?", pwdToStore, id)
 	}
 	if input.CharacterSet != nil {
 		_, _ = h.db.Exec("UPDATE mail_accounts SET character_set = ? WHERE id = ?", *input.CharacterSet, id)

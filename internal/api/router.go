@@ -113,7 +113,7 @@ func NewRouter(
 	scanH := NewScanHandler(db, cfg, consumer, q)
 	shareLinksH := NewShareLinksHandler(db, cfg)
 	schemaH := NewSchemaHandler()
-	mailH := NewMailHandler(db)
+	mailH := NewMailHandler(db, cfg)
 	systemH := NewSystemHandler(db, cfg)
 	vaultMgr := vault.NewVaultManager(db, cfg.MediaDir)
 	docsH.SetVaultManager(vaultMgr)
@@ -126,6 +126,10 @@ func NewRouter(
 		r.Get("/auth/oidc/login", authH.OIDCLogin)
 		r.Get("/auth/oidc/callback", authH.OIDCCallback)
 		r.Get("/auth/headless/*", authH.Headless)
+
+		// Mobile & Scanner Ingestion Webhook (authenticated via Ingestion Secret Token)
+		r.Post("/ingest/webhook/", docsH.PostDocumentWebhook)
+		r.Post("/ingest/webhook", docsH.PostDocumentWebhook)
 
 		// Authenticated API endpoints
 		r.Group(func(r chi.Router) {

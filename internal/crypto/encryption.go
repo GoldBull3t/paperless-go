@@ -6,10 +6,12 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 var (
@@ -288,5 +290,59 @@ func OpenVaultDecryptedStream(path string, vmek []byte) (io.ReadCloser, error) {
 	}
 
 	return io.NopCloser(bytes.NewReader(plaintext)), nil
+}
+
+// EncryptString encrypts a sensitive string (e.g. mail account password) using AES-256-GCM
+func EncryptString(plaintext, secret string) (string, error) {
+	if plaintext == "" {
+		return "", nil
+	}
+	key := DeriveKey(secret)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", err
+	}
+	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	return "ENC:" + hex.EncodeToString(ciphertext), nil
+}
+
+// DecryptString decrypts an encrypted string produced by EncryptString.
+// If the string does not have the "ENC:" prefix, it is returned as-is (backward compatible).
+func DecryptString(encoded, secret string) (string, error) {
+	if !strings.HasPrefix(encoded, "ENC:") {
+		return encoded, nil
+	}
+	rawHex := strings.TrimPrefix(encoded, "ENC:")
+	data, err := hex.DecodeString(rawHex)
+	if err != nil {
+		return "", fmt.Errorf("invalid hex ciphertext: %w", err)
+	}
+	key := DeriveKey(secret)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonceSize := gcm.NonceSize()
+	if len(data) < nonceSize {
+		return "", errors.New("ciphertext too short")
+	}
+	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", ErrDecryptionFail
+	}
+	return string(plaintext), nil
 }
 

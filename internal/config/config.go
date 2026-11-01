@@ -60,6 +60,9 @@ type Config struct {
 	BarcodeSeparator string
 	BarcodeEnableASN bool
 	BarcodeASNPrefix string
+
+	// Ingestion Webhook Configuration (Feature #8E)
+	WebhookIngestionToken string
 }
 
 func Load() *Config {
@@ -168,10 +171,11 @@ func Load() *Config {
 		OIDCUserInfoURL:    oidcUserInfoURL,
 		OIDCRedirectURI:    oidcRedirectURI,
 		OIDCAutoCreate:     oidcAutoCreate,
-		EnableBarcodes:     getEnv("PAPERLESS_CONSUMER_ENABLE_BARCODES", "true") == "true",
-		BarcodeSeparator:   getEnv("PAPERLESS_CONSUMER_BARCODE_STRING", "PATCHT"),
-		BarcodeEnableASN:   getEnv("PAPERLESS_CONSUMER_ENABLE_ASN_BARCODE", "true") == "true",
-		BarcodeASNPrefix:   getEnv("PAPERLESS_CONSUMER_ASN_BARCODE_PREFIX", "ASN"),
+		EnableBarcodes:        getEnv("PAPERLESS_CONSUMER_ENABLE_BARCODES", "true") == "true",
+		BarcodeSeparator:      getEnv("PAPERLESS_CONSUMER_BARCODE_STRING", "PATCHT"),
+		BarcodeEnableASN:      getEnv("PAPERLESS_CONSUMER_ENABLE_ASN_BARCODE", "true") == "true",
+		BarcodeASNPrefix:      getEnv("PAPERLESS_CONSUMER_ASN_BARCODE_PREFIX", "ASN"),
+		WebhookIngestionToken: getEnv("PAPERLESS_INGESTION_WEBHOOK_TOKEN", ""),
 	}
 }
 

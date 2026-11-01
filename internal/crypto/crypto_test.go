@@ -1,9 +1,10 @@
-﻿package crypto
+package crypto
 
 import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -109,6 +110,44 @@ func TestSecureShredding(t *testing.T) {
 
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Fatalf("Expected file to be deleted after shredding, got err=%v", err)
+	}
+}
+
+func TestEncryptDecryptString(t *testing.T) {
+	secretKey := "super-secure-mail-password-key-2026"
+	plainPassword := "MySecretEmailPassword!2026#$"
+
+	// 1. Encrypt
+	enc, err := EncryptString(plainPassword, secretKey)
+	if err != nil {
+		t.Fatalf("EncryptString failed: %v", err)
+	}
+	if enc == plainPassword {
+		t.Fatalf("Encrypted string equals plaintext!")
+	}
+	if !strings.HasPrefix(enc, "ENC:") {
+		t.Fatalf("Expected 'ENC:' prefix, got %q", enc)
+	}
+
+	// 2. Decrypt
+	dec, err := DecryptString(enc, secretKey)
+	if err != nil {
+		t.Fatalf("DecryptString failed: %v", err)
+	}
+	if dec != plainPassword {
+		t.Fatalf("Decrypted mismatch: got %q, want %q", dec, plainPassword)
+	}
+
+	// 3. Backward compatibility: unencrypted plaintext string returns as-is
+	unenc, err := DecryptString("legacyPlaintextPassword", secretKey)
+	if err != nil || unenc != "legacyPlaintextPassword" {
+		t.Fatalf("Expected unencrypted string to pass through, got %q (err: %v)", unenc, err)
+	}
+
+	// 4. Decrypt with wrong key fails
+	_, err = DecryptString(enc, "wrong-secret-key-999")
+	if err == nil {
+		t.Fatalf("Expected decryption with wrong key to fail!")
 	}
 }
 

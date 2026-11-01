@@ -3,6 +3,7 @@ package api
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -1366,6 +1367,178 @@ func (h *DocumentsHandler) PostDocument(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(taskID)
+}
+
+// PostDocumentWebhook handles mobile capture and external scanner ingestion webhooks.
+// It verifies authentication via a dedicated secret token (Authorization: Bearer <token> or X-Ingestion-Token),
+// applies security sandboxing on uploaded files (size limits, dangerous & double extension blocking, magic bytes verification),
+// and pushes valid files to the background ingestion queue.
+func (h *DocumentsHandler) PostDocumentWebhook(w http.ResponseWriter, r *http.Request) {
+	expectedToken := ""
+	if h.cfg != nil {
+		expectedToken = h.cfg.WebhookIngestionToken
+	}
+
+	if expectedToken == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":  "forbidden",
+			"detail": "Mobile ingestion webhook is disabled (PAPERLESS_INGESTION_WEBHOOK_TOKEN is not configured)",
+		})
+		return
+	}
+
+	// Extract token from Authorization header or X-Ingestion-Token
+	var providedToken string
+	authHeader := r.Header.Get("Authorization")
+	if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+		providedToken = strings.TrimSpace(authHeader[7:])
+	} else if xToken := r.Header.Get("X-Ingestion-Token"); xToken != "" {
+		providedToken = strings.TrimSpace(xToken)
+	}
+
+	if subtle.ConstantTimeCompare([]byte(providedToken), []byte(expectedToken)) != 1 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":  "unauthorized",
+			"detail": "Invalid or missing webhook ingestion token",
+		})
+		return
+	}
+
+	// Guard against unconstrained memory/disk exhaustion (Max 50MB)
+	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":  "bad_request",
+			"detail": "Failed to parse multipart form: " + err.Error(),
+		})
+		return
+	}
+
+	// Look for 'file' or 'document' multipart field
+	file, header, err := r.FormFile("document")
+	if err != nil {
+		file, header, err = r.FormFile("file")
+	}
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":  "bad_request",
+			"detail": "Missing file in multipart form (expected field 'document' or 'file')",
+		})
+		return
+	}
+	defer file.Close()
+
+	fileBytes, err := io.ReadAll(file)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":  "read_failed",
+			"detail": "Failed to read uploaded file: " + err.Error(),
+		})
+		return
+	}
+
+	// Rigorous security validation (Size limit, dangerous/double extensions, magic bytes)
+	sanitizedName, err := consumer.ValidateAttachment(header.Filename, fileBytes)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":  "security_violation",
+			"detail": err.Error(),
+		})
+		return
+	}
+
+	tmpFile, err := os.CreateTemp("", "paperless-webhook-*"+filepath.Ext(sanitizedName))
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":  "temp_file_failed",
+			"detail": "Failed to create temp file: " + err.Error(),
+		})
+		return
+	}
+	defer tmpFile.Close()
+
+	if _, err := tmpFile.Write(fileBytes); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":  "temp_write_failed",
+			"detail": "Failed to write temp file: " + err.Error(),
+		})
+		return
+	}
+
+	tmpPath := tmpFile.Name()
+	fileName := sanitizedName
+
+	var opts consumer.ConsumeOptions
+	if t := r.FormValue("title"); t != "" {
+		opts.Title = t
+	}
+	if cStr := r.FormValue("correspondent"); cStr != "" {
+		if cID, err := strconv.Atoi(cStr); err == nil {
+			opts.Correspondent = &cID
+		}
+	}
+	if dtStr := r.FormValue("document_type"); dtStr != "" {
+		if dtID, err := strconv.Atoi(dtStr); err == nil {
+			opts.DocumentType = &dtID
+		}
+	}
+	if spStr := r.FormValue("storage_path"); spStr != "" {
+		if spID, err := strconv.Atoi(spStr); err == nil {
+			opts.StoragePath = &spID
+		}
+	}
+	if asnStr := r.FormValue("archive_serial_number"); asnStr != "" {
+		if asn, err := strconv.Atoi(asnStr); err == nil {
+			opts.ArchiveSerialNumber = &asn
+		}
+	}
+	if crStr := r.FormValue("created"); crStr != "" {
+		if crTime, err := time.Parse(time.RFC3339, crStr); err == nil {
+			opts.Created = &crTime
+		} else if crDate, err := time.Parse("2006-01-02", crStr); err == nil {
+			opts.Created = &crDate
+		}
+	}
+	if r.MultipartForm != nil {
+		if tagVals, ok := r.MultipartForm.Value["tags"]; ok {
+			for _, tv := range tagVals {
+				for _, part := range strings.Split(tv, ",") {
+					if tid, err := strconv.Atoi(strings.TrimSpace(part)); err == nil {
+						opts.Tags = append(opts.Tags, tid)
+					}
+				}
+			}
+		}
+	}
+
+	taskID := h.queue.Enqueue("Mobile Webhook Ingestion", fileName, tmpPath, func(tid string) (int, error) {
+		defer os.Remove(tmpPath)
+		return h.consumer.ConsumeFile(tmpPath, fileName, &opts)
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   "queued",
+		"task_id":  taskID,
+		"filename": fileName,
+	})
 }
 
 func (h *DocumentsHandler) CheckDuplicate(w http.ResponseWriter, r *http.Request) {

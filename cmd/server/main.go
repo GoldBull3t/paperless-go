@@ -233,10 +233,14 @@ func main() {
 	defer wsHub.Close()
 	taskQueue.SetBroadcaster(wsHub)
 
-	// 6. Initialize Watcher
+	// 6. Initialize Ingestion Watchers (Directory Watcher & Secure IMAP Fetcher)
 	watcher := consumer.NewWatcher(cfg.ConsumeDir, docConsumer, taskQueue)
 	watcher.Start()
 	defer watcher.Stop()
+
+	mailFetcher := consumer.NewMailFetcher(db, cfg, docConsumer, taskQueue)
+	mailFetcher.Start()
+	defer mailFetcher.Stop()
 
 	// 7. Initialize HTTP Router
 	router := api.NewRouter(cfg, db, authSvc, taskQueue, docConsumer, wsHub)
