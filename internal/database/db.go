@@ -148,6 +148,12 @@ func (db *DB) BackupTo(dstPath string) error {
 }
 
 func addColumnIfNotExists(db *DB, table, column, colDef string) error {
+	var tableExists int
+	_ = db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?", table).Scan(&tableExists)
+	if tableExists == 0 {
+		return nil // Table does not exist in this database; skipping ALTER
+	}
+
 	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
 	if err != nil {
 		return fmt.Errorf("failed to inspect table info for %s: %w", table, err)
@@ -480,6 +486,57 @@ func (db *DB) migrate() error {
 				// Data migration for older databases where mail_accounts had 'server' and 'port' instead of 'imap_server' and 'imap_port'
 				_, _ = db.Exec("UPDATE mail_accounts SET imap_server = server WHERE (imap_server IS NULL OR imap_server = '') AND server IS NOT NULL")
 				_, _ = db.Exec("UPDATE mail_accounts SET imap_port = port WHERE (imap_port IS NULL OR imap_port = 0) AND port IS NOT NULL")
+
+				return nil
+			},
+		},
+		{
+			version: 8,
+			name:    "0008_sessions_phash_and_oauth_accounts",
+			run: func(db *DB) error {
+				// 1. User Sessions table for active session management & device revocation
+				sessionTableStmt := `
+					CREATE TABLE IF NOT EXISTS user_sessions (
+						id INTEGER PRIMARY KEY AUTOINCREMENT,
+						user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+						token_hash TEXT UNIQUE NOT NULL,
+						device_name TEXT DEFAULT '',
+						ip_address TEXT DEFAULT '',
+						user_agent TEXT DEFAULT '',
+						created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+						last_active_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+						expires_at DATETIME
+					);
+					CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
+					CREATE INDEX IF NOT EXISTS idx_user_sessions_token ON user_sessions(token_hash);
+				`
+				if _, err := db.Exec(sessionTableStmt); err != nil {
+					return fmt.Errorf("migration 8 failed creating user_sessions table: %w", err)
+				}
+
+				// 2. Add perceptual hash column to documents
+				if err := addColumnIfNotExists(db, "documents", "phash", "TEXT DEFAULT ''"); err != nil {
+					return fmt.Errorf("migration 8 error adding documents.phash: %w", err)
+				}
+				_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_documents_phash ON documents(phash) WHERE phash != ''")
+
+				// 3. Add OAuth2 fields to mail_accounts
+				oauthCols := []struct {
+					table  string
+					column string
+					def    string
+				}{
+					{"mail_accounts", "auth_type", "TEXT DEFAULT 'password'"},
+					{"mail_accounts", "oauth_client_id", "TEXT DEFAULT ''"},
+					{"mail_accounts", "oauth_client_secret", "TEXT DEFAULT ''"},
+					{"mail_accounts", "oauth_refresh_token", "TEXT DEFAULT ''"},
+					{"mail_accounts", "oauth_token_url", "TEXT DEFAULT ''"},
+				}
+				for _, col := range oauthCols {
+					if err := addColumnIfNotExists(db, col.table, col.column, col.def); err != nil {
+						return fmt.Errorf("migration 8 error adding %s.%s: %w", col.table, col.column, err)
+					}
+				}
 
 				return nil
 			},

@@ -144,6 +144,11 @@ func NewRouter(
 			r.Post("/profile/totp/", authH.ActivateTotp)
 			r.Delete("/profile/totp/", authH.DeactivateTotp)
 
+			// Active Sessions & Granular Device Revocation
+			r.Get("/profile/sessions/", authH.ListSessions)
+			r.Delete("/profile/sessions/other/", authH.RevokeOtherSessions)
+			r.Delete("/profile/sessions/{id}/", authH.RevokeSession)
+
 			r.Get("/ui_settings/", uiSettingsH.Get)
 			r.Post("/ui_settings/", uiSettingsH.Post)
 

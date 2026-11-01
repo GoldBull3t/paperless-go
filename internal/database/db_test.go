@@ -136,8 +136,8 @@ func TestVersionedMigrations(t *testing.T) {
 		t.Fatalf("GetAppliedMigrations failed: %v", err)
 	}
 
-	if len(records) < 7 {
-		t.Fatalf("expected at least 7 applied migrations, got %d", len(records))
+	if len(records) < 8 {
+		t.Fatalf("expected at least 8 applied migrations, got %d", len(records))
 	}
 
 	if records[0].Version != 1 || records[0].Name != "0001_initial_schema" {

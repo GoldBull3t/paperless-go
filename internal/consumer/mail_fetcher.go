@@ -76,15 +76,20 @@ func (mf *MailFetcher) Stop() {
 }
 
 type mailAccountRecord struct {
-	id           int
-	name         string
-	server       string
-	port         int
-	security     int // 1=None, 2=StartTLS, 3=SSL/TLS
-	username     string
-	password     string
-	characterSet string
-	ownerID      *int
+	id                int
+	name              string
+	server            string
+	port              int
+	security          int // 1=None, 2=StartTLS, 3=SSL/TLS
+	username          string
+	password          string
+	characterSet      string
+	authType          string
+	oauthClientID     string
+	oauthClientSecret string
+	oauthRefreshToken string
+	oauthTokenURL     string
+	ownerID           *int
 }
 
 type mailRuleRecord struct {
@@ -102,7 +107,8 @@ type mailRuleRecord struct {
 // PollOnce inspects all active mail accounts and checks for messages
 func (mf *MailFetcher) PollOnce() error {
 	rows, err := mf.db.Query(`
-		SELECT id, name, imap_server, imap_port, imap_security, username, password, character_set, owner_id
+		SELECT id, name, imap_server, imap_port, imap_security, username, password, character_set,
+		       auth_type, oauth_client_id, oauth_client_secret, oauth_refresh_token, oauth_token_url, owner_id
 		FROM mail_accounts
 	`)
 	if err != nil {
@@ -114,7 +120,10 @@ func (mf *MailFetcher) PollOnce() error {
 	for rows.Next() {
 		var a mailAccountRecord
 		var owner sql.NullInt64
-		if err := rows.Scan(&a.id, &a.name, &a.server, &a.port, &a.security, &a.username, &a.password, &a.characterSet, &owner); err == nil {
+		if err := rows.Scan(
+			&a.id, &a.name, &a.server, &a.port, &a.security, &a.username, &a.password, &a.characterSet,
+			&a.authType, &a.oauthClientID, &a.oauthClientSecret, &a.oauthRefreshToken, &a.oauthTokenURL, &owner,
+		); err == nil {
 			if owner.Valid {
 				v := int(owner.Int64)
 				a.ownerID = &v
@@ -190,9 +199,22 @@ func (mf *MailFetcher) PollAccount(acc mailAccountRecord) error {
 }
 
 func (mf *MailFetcher) processClientMail(client *imapclient.Client, acc mailAccountRecord, plainPass string) error {
-	// 1. Login
-	if err := client.Login(acc.username, plainPass).Wait(); err != nil {
-		return fmt.Errorf("IMAP authentication failed for %s@%s: %w", acc.username, acc.server, err)
+	// 1. Authenticate (Password or OAuth2/XOAUTH2)
+	if strings.EqualFold(acc.authType, "oauth2") {
+		plainSecret, _ := crypto.DecryptString(acc.oauthClientSecret, mf.cfg.SecretKey)
+		plainRefresh, _ := crypto.DecryptString(acc.oauthRefreshToken, mf.cfg.SecretKey)
+		accessToken, err := RefreshOAuth2Token(acc.oauthTokenURL, acc.oauthClientID, plainSecret, plainRefresh)
+		if err != nil {
+			return fmt.Errorf("OAuth2 token refresh failed for %s@%s: %w", acc.username, acc.server, err)
+		}
+		saslClient := NewXOAuth2Client(acc.username, accessToken)
+		if err := client.Authenticate(saslClient); err != nil {
+			return fmt.Errorf("IMAP XOAUTH2 authentication failed for %s@%s: %w", acc.username, acc.server, err)
+		}
+	} else {
+		if err := client.Login(acc.username, plainPass).Wait(); err != nil {
+			return fmt.Errorf("IMAP authentication failed for %s@%s: %w", acc.username, acc.server, err)
+		}
 	}
 	defer client.Logout()
 

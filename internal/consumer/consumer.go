@@ -500,6 +500,11 @@ func (c *Consumer) ConsumeFileWithContext(ctx context.Context, srcPath, original
 		_ = GenerateThumbnail(destPath, thumbPath, mimeType)
 	}
 
+	// Compute perceptual hash (dHash) for visual duplicate detection
+	if dHash, err := CalculateImageDHashFromFile(thumbPath); err == nil && dHash != "" {
+		_, _ = c.db.Exec("UPDATE documents SET phash = ? WHERE id = ?", dHash, docID)
+	}
+
 	return docID, nil
 }
 

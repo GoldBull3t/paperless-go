@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"html"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"paperless-go/internal/auth"
 	"paperless-go/internal/database"
 	"paperless-go/internal/oidc"
@@ -138,6 +140,8 @@ func (h *AuthHandler) GetToken(w http.ResponseWriter, r *http.Request) {
 		token = auth.GenerateToken(40)
 		_, _ = h.db.Exec("UPDATE users SET auth_token = ? WHERE id = ?", token, id)
 	}
+
+	_ = h.authSvc.CreateSession(id, token, r)
 
 	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
 
@@ -770,9 +774,72 @@ func (h *AuthHandler) GenerateAuthToken(w http.ResponseWriter, r *http.Request) 
 	}
 	token := auth.GenerateToken(40)
 	_, _ = h.db.Exec("UPDATE users SET auth_token = ? WHERE id = ?", token, user.ID)
+	_ = h.authSvc.CreateSession(user.ID, token, r)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"auth_token": token})
+}
+
+func (h *AuthHandler) ListSessions(w http.ResponseWriter, r *http.Request) {
+	user := GetUserFromContext(r.Context())
+	if user == nil {
+		http.Error(w, `{"detail": "Unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+	currentToken := extractTokenFromRequest(r)
+	sessions, err := h.authSvc.ListUserSessions(user.ID, currentToken)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(sessions)
+}
+
+func (h *AuthHandler) RevokeSession(w http.ResponseWriter, r *http.Request) {
+	user := GetUserFromContext(r.Context())
+	if user == nil {
+		http.Error(w, `{"detail": "Unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+	sessionID, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	if sessionID <= 0 {
+		http.Error(w, `{"detail": "Invalid session ID"}`, http.StatusBadRequest)
+		return
+	}
+	if err := h.authSvc.RevokeSession(user.ID, sessionID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *AuthHandler) RevokeOtherSessions(w http.ResponseWriter, r *http.Request) {
+	user := GetUserFromContext(r.Context())
+	if user == nil {
+		http.Error(w, `{"detail": "Unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+	currentToken := extractTokenFromRequest(r)
+	if err := h.authSvc.RevokeOtherSessions(user.ID, currentToken); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func extractTokenFromRequest(r *http.Request) string {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" {
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) == 2 {
+			return parts[1]
+		}
+	}
+	if c, err := r.Cookie("sessionid"); err == nil {
+		return c.Value
+	}
+	return ""
 }
 
 func (h *AuthHandler) DisconnectSocialAccount(w http.ResponseWriter, r *http.Request) {

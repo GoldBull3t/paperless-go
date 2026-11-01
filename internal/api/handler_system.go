@@ -1,4 +1,4 @@
-﻿package api
+package api
 
 import (
 	"encoding/json"
@@ -140,10 +140,13 @@ func (h *SystemHandler) PrometheusMetrics(w http.ResponseWriter, r *http.Request
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
-	var docCount, tagCount, corrCount int
+	var docCount, tagCount, corrCount, vaultCount, tasksPending, mailCount int
 	_ = h.db.QueryRow("SELECT COUNT(*) FROM documents WHERE deleted_at IS NULL").Scan(&docCount)
 	_ = h.db.QueryRow("SELECT COUNT(*) FROM tags").Scan(&tagCount)
 	_ = h.db.QueryRow("SELECT COUNT(*) FROM correspondents").Scan(&corrCount)
+	_ = h.db.QueryRow("SELECT COUNT(*) FROM documents WHERE is_vault = 1").Scan(&vaultCount)
+	_ = h.db.QueryRow("SELECT COUNT(*) FROM tasks WHERE status IN ('PENDING', 'STARTED')").Scan(&tasksPending)
+	_ = h.db.QueryRow("SELECT COUNT(*) FROM processed_mail").Scan(&mailCount)
 
 	uptimeSec := time.Since(startTime).Seconds()
 
@@ -180,6 +183,18 @@ paperless_go_memory_sys_bytes %d
 # TYPE paperless_go_documents_total gauge
 paperless_go_documents_total %d
 
+# HELP paperless_go_vault_documents_total Total number of encrypted vault documents
+# TYPE paperless_go_vault_documents_total gauge
+paperless_go_vault_documents_total %d
+
+# HELP paperless_go_queue_pending_tasks Tasks currently waiting or running in queue
+# TYPE paperless_go_queue_pending_tasks gauge
+paperless_go_queue_pending_tasks %d
+
+# HELP paperless_go_mail_processed_total Cumulative ingested emails
+# TYPE paperless_go_mail_processed_total counter
+paperless_go_mail_processed_total %d
+
 # HELP paperless_go_tags_total Total number of tags
 # TYPE paperless_go_tags_total gauge
 paperless_go_tags_total %d
@@ -187,7 +202,7 @@ paperless_go_tags_total %d
 # HELP paperless_go_correspondents_total Total number of correspondents
 # TYPE paperless_go_correspondents_total gauge
 paperless_go_correspondents_total %d
-`, runtime.Version(), runtime.GOOS, runtime.GOARCH, uptimeSec, reqs, runtime.NumGoroutine(), m.Alloc, m.Sys, docCount, tagCount, corrCount)
+`, runtime.Version(), runtime.GOOS, runtime.GOARCH, uptimeSec, reqs, runtime.NumGoroutine(), m.Alloc, m.Sys, docCount, vaultCount, tasksPending, mailCount, tagCount, corrCount)
 
 	_, _ = w.Write([]byte(out))
 }

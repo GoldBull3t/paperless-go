@@ -143,12 +143,28 @@ func (s *Service) AuthenticateRequest(r *http.Request) (*models.User, error) {
 		parts := strings.SplitN(authHeader, " ", 2)
 		if len(parts) == 2 && (strings.EqualFold(parts[0], "Token") || strings.EqualFold(parts[0], "Bearer")) {
 			token := parts[1]
+			tokenHash := HashToken(token)
+
+			// Check user_sessions first
 			var user models.User
 			err := s.db.QueryRow(`
+				SELECT u.id, u.username, u.email, u.first_name, u.last_name, u.is_superuser, u.is_staff, u.is_active, u.date_joined
+				FROM user_sessions s
+				JOIN users u ON s.user_id = u.id
+				WHERE s.token_hash = ? AND u.is_active = 1
+			`, tokenHash).Scan(&user.ID, &user.Username, &user.Email, &user.FirstName, &user.LastName, &user.IsSuperuser, &user.IsStaff, &user.IsActive, &user.DateJoined)
+			if err == nil {
+				_, _ = s.db.Exec("UPDATE user_sessions SET last_active_at = CURRENT_TIMESTAMP WHERE token_hash = ?", tokenHash)
+				return &user, nil
+			}
+
+			// Fallback check users table (API tokens)
+			err = s.db.QueryRow(`
 				SELECT id, username, email, first_name, last_name, is_superuser, is_staff, is_active, date_joined
 				FROM users WHERE auth_token = ? AND is_active = 1
 			`, token).Scan(&user.ID, &user.Username, &user.Email, &user.FirstName, &user.LastName, &user.IsSuperuser, &user.IsStaff, &user.IsActive, &user.DateJoined)
 			if err == nil {
+				_ = s.CreateSession(user.ID, token, r)
 				return &user, nil
 			}
 		}
@@ -157,12 +173,25 @@ func (s *Service) AuthenticateRequest(r *http.Request) (*models.User, error) {
 	// 2. Check session cookie
 	cookie, err := r.Cookie("sessionid")
 	if err == nil && cookie.Value != "" {
+		tokenHash := HashToken(cookie.Value)
 		var user models.User
 		err := s.db.QueryRow(`
+			SELECT u.id, u.username, u.email, u.first_name, u.last_name, u.is_superuser, u.is_staff, u.is_active, u.date_joined
+			FROM user_sessions s
+			JOIN users u ON s.user_id = u.id
+			WHERE s.token_hash = ? AND u.is_active = 1
+		`, tokenHash).Scan(&user.ID, &user.Username, &user.Email, &user.FirstName, &user.LastName, &user.IsSuperuser, &user.IsStaff, &user.IsActive, &user.DateJoined)
+		if err == nil {
+			_, _ = s.db.Exec("UPDATE user_sessions SET last_active_at = CURRENT_TIMESTAMP WHERE token_hash = ?", tokenHash)
+			return &user, nil
+		}
+
+		err = s.db.QueryRow(`
 			SELECT id, username, email, first_name, last_name, is_superuser, is_staff, is_active, date_joined
 			FROM users WHERE auth_token = ? AND is_active = 1
 		`, cookie.Value).Scan(&user.ID, &user.Username, &user.Email, &user.FirstName, &user.LastName, &user.IsSuperuser, &user.IsStaff, &user.IsActive, &user.DateJoined)
 		if err == nil {
+			_ = s.CreateSession(user.ID, cookie.Value, r)
 			return &user, nil
 		}
 	}

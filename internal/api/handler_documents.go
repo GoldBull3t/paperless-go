@@ -1546,6 +1546,40 @@ func (h *DocumentsHandler) CheckDuplicate(w http.ResponseWriter, r *http.Request
 	if checksum == "" {
 		checksum = r.URL.Query().Get("md5")
 	}
+
+	pHash := r.URL.Query().Get("phash")
+	if checksum == "" && pHash != "" {
+		// Check visual duplicate by perceptual hash
+		rows, err := h.db.Query("SELECT id, title, original_filename, created, phash FROM documents WHERE phash != '' AND deleted_at IS NULL")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var dID int
+				var dTitle, dOrig, dPHash string
+				var dCreated time.Time
+				if err := rows.Scan(&dID, &dTitle, &dOrig, &dCreated, &dPHash); err == nil {
+					if consumer.IsVisualDuplicate(pHash, dPHash, 5) {
+						w.Header().Set("Content-Type", "application/json")
+						_ = json.NewEncoder(w).Encode(map[string]interface{}{
+							"duplicate":         true,
+							"visual_duplicate":  true,
+							"document_id":       dID,
+							"title":             dTitle,
+							"original_filename": dOrig,
+							"created":           dCreated,
+						})
+						return
+					}
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"duplicate": false,
+		})
+		return
+	}
+
 	if checksum == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)

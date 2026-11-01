@@ -63,6 +63,12 @@ type Config struct {
 
 	// Ingestion Webhook Configuration (Feature #8E)
 	WebhookIngestionToken string
+
+	// Automated Scheduled Backups Configuration
+	BackupEnabled       bool
+	BackupDir           string
+	BackupIntervalHours int
+	BackupRetentionDays int
 }
 
 func Load() *Config {
@@ -176,6 +182,10 @@ func Load() *Config {
 		BarcodeEnableASN:      getEnv("PAPERLESS_CONSUMER_ENABLE_ASN_BARCODE", "true") == "true",
 		BarcodeASNPrefix:      getEnv("PAPERLESS_CONSUMER_ASN_BARCODE_PREFIX", "ASN"),
 		WebhookIngestionToken: getEnv("PAPERLESS_INGESTION_WEBHOOK_TOKEN", ""),
+		BackupEnabled:         getEnv("PAPERLESS_BACKUP_ENABLED", "true") == "true",
+		BackupDir:             getEnv("PAPERLESS_BACKUP_DIR", filepath.Join(dataDir, "backups")),
+		BackupIntervalHours:   getEnvInt("PAPERLESS_BACKUP_INTERVAL_HOURS", 24),
+		BackupRetentionDays:   getEnvInt("PAPERLESS_BACKUP_RETENTION_DAYS", 7),
 	}
 }
 

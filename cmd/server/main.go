@@ -15,6 +15,7 @@ import (
 
 	"paperless-go/internal/api"
 	"paperless-go/internal/auth"
+	"paperless-go/internal/backup"
 	"paperless-go/internal/config"
 	"paperless-go/internal/consumer"
 	"paperless-go/internal/database"
@@ -198,6 +199,10 @@ func main() {
 
 	// 4. Start Continuous SQLite WAL & Query Planner Maintenance
 	db.StartMaintenance(rootCtx, 1*time.Hour)
+
+	// Automated Scheduled Snapshots & Backup Rotation
+	backupMgr := backup.NewManager(db, cfg)
+	backupMgr.Start(rootCtx)
 
 	// 5. Initialize In-Memory Queue & Document Consumer
 	taskQueue := queue.NewQueue(db, cfg.OCRWorkerCount)

@@ -127,16 +127,21 @@ func (h *MailHandler) GetAccount(w http.ResponseWriter, r *http.Request) {
 
 func (h *MailHandler) CreateAccount(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Name         string `json:"name"`
-		ImapServer   string `json:"imap_server"`
-		ImapPort     int    `json:"imap_port"`
-		ImapSecurity int    `json:"imap_security"`
-		Username     string `json:"username"`
-		Password     string `json:"password"`
-		CharacterSet string `json:"character_set"`
-		IsToken      bool   `json:"is_token"`
-		AccountType  int    `json:"account_type"`
-		Owner        *int   `json:"owner"`
+		Name              string `json:"name"`
+		ImapServer        string `json:"imap_server"`
+		ImapPort          int    `json:"imap_port"`
+		ImapSecurity      int    `json:"imap_security"`
+		Username          string `json:"username"`
+		Password          string `json:"password"`
+		CharacterSet      string `json:"character_set"`
+		IsToken           bool   `json:"is_token"`
+		AccountType       int    `json:"account_type"`
+		AuthType          string `json:"auth_type"`
+		OAuthClientID     string `json:"oauth_client_id"`
+		OAuthClientSecret string `json:"oauth_client_secret"`
+		OAuthRefreshToken string `json:"oauth_refresh_token"`
+		OAuthTokenURL     string `json:"oauth_token_url"`
+		Owner             *int   `json:"owner"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -155,18 +160,35 @@ func (h *MailHandler) CreateAccount(w http.ResponseWriter, r *http.Request) {
 	if input.AccountType == 0 {
 		input.AccountType = 1
 	}
+	if input.AuthType == "" {
+		input.AuthType = "password"
+	}
 
 	pwdToStore := input.Password
-	if h.cfg != nil && h.cfg.SecretKey != "" && pwdToStore != "" {
-		if enc, err := crypto.EncryptString(pwdToStore, h.cfg.SecretKey); err == nil {
-			pwdToStore = enc
+	oauthSecretToStore := input.OAuthClientSecret
+	oauthRefreshToStore := input.OAuthRefreshToken
+	if h.cfg != nil && h.cfg.SecretKey != "" {
+		if pwdToStore != "" {
+			if enc, err := crypto.EncryptString(pwdToStore, h.cfg.SecretKey); err == nil {
+				pwdToStore = enc
+			}
+		}
+		if oauthSecretToStore != "" {
+			if enc, err := crypto.EncryptString(oauthSecretToStore, h.cfg.SecretKey); err == nil {
+				oauthSecretToStore = enc
+			}
+		}
+		if oauthRefreshToStore != "" {
+			if enc, err := crypto.EncryptString(oauthRefreshToStore, h.cfg.SecretKey); err == nil {
+				oauthRefreshToStore = enc
+			}
 		}
 	}
 
 	res, err := h.db.Exec(`
-		INSERT INTO mail_accounts (name, imap_server, imap_port, imap_security, username, password, character_set, is_token, account_type, owner_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, input.Name, input.ImapServer, input.ImapPort, input.ImapSecurity, input.Username, pwdToStore, input.CharacterSet, input.IsToken, input.AccountType, input.Owner)
+		INSERT INTO mail_accounts (name, imap_server, imap_port, imap_security, username, password, character_set, is_token, account_type, auth_type, oauth_client_id, oauth_client_secret, oauth_refresh_token, oauth_token_url, owner_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, input.Name, input.ImapServer, input.ImapPort, input.ImapSecurity, input.Username, pwdToStore, input.CharacterSet, input.IsToken, input.AccountType, input.AuthType, input.OAuthClientID, oauthSecretToStore, oauthRefreshToStore, input.OAuthTokenURL, input.Owner)
 	if err != nil {
 		http.Error(w, "Account name already exists or database error: "+err.Error(), http.StatusBadRequest)
 		return
@@ -206,16 +228,21 @@ func (h *MailHandler) UpdateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var input struct {
-		Name         *string `json:"name"`
-		ImapServer   *string `json:"imap_server"`
-		ImapPort     *int    `json:"imap_port"`
-		ImapSecurity *int    `json:"imap_security"`
-		Username     *string `json:"username"`
-		Password     *string `json:"password"`
-		CharacterSet *string `json:"character_set"`
-		IsToken      *bool   `json:"is_token"`
-		AccountType  *int    `json:"account_type"`
-		Owner        *int    `json:"owner"`
+		Name              *string `json:"name"`
+		ImapServer        *string `json:"imap_server"`
+		ImapPort          *int    `json:"imap_port"`
+		ImapSecurity      *int    `json:"imap_security"`
+		Username          *string `json:"username"`
+		Password          *string `json:"password"`
+		CharacterSet      *string `json:"character_set"`
+		IsToken           *bool   `json:"is_token"`
+		AccountType       *int    `json:"account_type"`
+		AuthType          *string `json:"auth_type"`
+		OAuthClientID     *string `json:"oauth_client_id"`
+		OAuthClientSecret *string `json:"oauth_client_secret"`
+		OAuthRefreshToken *string `json:"oauth_refresh_token"`
+		OAuthTokenURL     *string `json:"oauth_token_url"`
+		Owner             *int    `json:"owner"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -245,6 +272,33 @@ func (h *MailHandler) UpdateAccount(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		_, _ = h.db.Exec("UPDATE mail_accounts SET password = ? WHERE id = ?", pwdToStore, id)
+	}
+	if input.AuthType != nil {
+		_, _ = h.db.Exec("UPDATE mail_accounts SET auth_type = ? WHERE id = ?", *input.AuthType, id)
+	}
+	if input.OAuthClientID != nil {
+		_, _ = h.db.Exec("UPDATE mail_accounts SET oauth_client_id = ? WHERE id = ?", *input.OAuthClientID, id)
+	}
+	if input.OAuthClientSecret != nil && strings.Trim(*input.OAuthClientSecret, "*") != "" {
+		secToStore := *input.OAuthClientSecret
+		if h.cfg != nil && h.cfg.SecretKey != "" {
+			if enc, err := crypto.EncryptString(secToStore, h.cfg.SecretKey); err == nil {
+				secToStore = enc
+			}
+		}
+		_, _ = h.db.Exec("UPDATE mail_accounts SET oauth_client_secret = ? WHERE id = ?", secToStore, id)
+	}
+	if input.OAuthRefreshToken != nil && strings.Trim(*input.OAuthRefreshToken, "*") != "" {
+		refToStore := *input.OAuthRefreshToken
+		if h.cfg != nil && h.cfg.SecretKey != "" {
+			if enc, err := crypto.EncryptString(refToStore, h.cfg.SecretKey); err == nil {
+				refToStore = enc
+			}
+		}
+		_, _ = h.db.Exec("UPDATE mail_accounts SET oauth_refresh_token = ? WHERE id = ?", refToStore, id)
+	}
+	if input.OAuthTokenURL != nil {
+		_, _ = h.db.Exec("UPDATE mail_accounts SET oauth_token_url = ? WHERE id = ?", *input.OAuthTokenURL, id)
 	}
 	if input.CharacterSet != nil {
 		_, _ = h.db.Exec("UPDATE mail_accounts SET character_set = ? WHERE id = ?", *input.CharacterSet, id)
