@@ -353,6 +353,137 @@ func (db *DB) migrate() error {
 				return nil
 			},
 		},
+		{
+			version: 7,
+			name:    "0007_mail_schema_parity_and_columns",
+			run: func(db *DB) error {
+				// Ensure tables exist
+				createTablesStmt := `
+					CREATE TABLE IF NOT EXISTS mail_accounts (
+						id INTEGER PRIMARY KEY AUTOINCREMENT,
+						name TEXT UNIQUE NOT NULL,
+						imap_server TEXT NOT NULL DEFAULT '',
+						imap_port INTEGER DEFAULT 993,
+						imap_security INTEGER DEFAULT 2,
+						username TEXT NOT NULL DEFAULT '',
+						password TEXT NOT NULL DEFAULT '',
+						character_set TEXT DEFAULT 'UTF-8',
+						is_token BOOLEAN DEFAULT 0,
+						account_type INTEGER DEFAULT 1,
+						owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+					);
+
+					CREATE TABLE IF NOT EXISTS mail_rules (
+						id INTEGER PRIMARY KEY AUTOINCREMENT,
+						name TEXT UNIQUE NOT NULL,
+						account_id INTEGER REFERENCES mail_accounts(id) ON DELETE CASCADE,
+						enabled BOOLEAN DEFAULT 1,
+						folder TEXT DEFAULT 'INBOX',
+						filter_from TEXT DEFAULT '',
+						filter_to TEXT DEFAULT '',
+						filter_subject TEXT DEFAULT '',
+						filter_body TEXT DEFAULT '',
+						filter_attachment_filename_include TEXT DEFAULT '',
+						filter_attachment_filename_exclude TEXT DEFAULT '',
+						maximum_age INTEGER DEFAULT 30,
+						action INTEGER DEFAULT 1,
+						action_parameter TEXT DEFAULT '',
+						assign_title_from INTEGER DEFAULT 1,
+						assign_tags_json TEXT DEFAULT '[]',
+						assign_correspondent_from INTEGER DEFAULT 1,
+						assign_correspondent_id INTEGER REFERENCES correspondents(id) ON DELETE SET NULL,
+						assign_document_type_id INTEGER REFERENCES document_types(id) ON DELETE SET NULL,
+						assign_owner_from_rule BOOLEAN DEFAULT 1,
+						order_num INTEGER DEFAULT 0,
+						attachment_type INTEGER DEFAULT 1,
+						consumption_scope INTEGER DEFAULT 1,
+						pdf_layout INTEGER DEFAULT 1,
+						stop_processing BOOLEAN DEFAULT 0,
+						owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+					);
+
+					CREATE TABLE IF NOT EXISTS processed_mail (
+						id INTEGER PRIMARY KEY AUTOINCREMENT,
+						account_id INTEGER REFERENCES mail_accounts(id) ON DELETE CASCADE,
+						rule_id INTEGER REFERENCES mail_rules(id) ON DELETE SET NULL,
+						folder TEXT NOT NULL DEFAULT 'INBOX',
+						uid TEXT NOT NULL DEFAULT '',
+						subject TEXT DEFAULT '',
+						received DATETIME DEFAULT CURRENT_TIMESTAMP,
+						processed DATETIME DEFAULT CURRENT_TIMESTAMP,
+						status TEXT DEFAULT 'SUCCESS',
+						error TEXT DEFAULT '',
+						owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+					);
+				`
+				if _, err := db.Exec(createTablesStmt); err != nil {
+					return fmt.Errorf("migration 7 failed creating mail tables: %w", err)
+				}
+
+				mailColumns := []struct {
+					table  string
+					column string
+					def    string
+				}{
+					// mail_accounts
+					{"mail_accounts", "imap_server", "TEXT NOT NULL DEFAULT ''"},
+					{"mail_accounts", "imap_port", "INTEGER DEFAULT 993"},
+					{"mail_accounts", "imap_security", "INTEGER DEFAULT 2"},
+					{"mail_accounts", "character_set", "TEXT DEFAULT 'UTF-8'"},
+					{"mail_accounts", "is_token", "BOOLEAN DEFAULT 0"},
+					{"mail_accounts", "account_type", "INTEGER DEFAULT 1"},
+					{"mail_accounts", "owner_id", "INTEGER"},
+
+					// mail_rules
+					{"mail_rules", "enabled", "BOOLEAN DEFAULT 1"},
+					{"mail_rules", "folder", "TEXT DEFAULT 'INBOX'"},
+					{"mail_rules", "filter_from", "TEXT DEFAULT ''"},
+					{"mail_rules", "filter_to", "TEXT DEFAULT ''"},
+					{"mail_rules", "filter_subject", "TEXT DEFAULT ''"},
+					{"mail_rules", "filter_body", "TEXT DEFAULT ''"},
+					{"mail_rules", "filter_attachment_filename_include", "TEXT DEFAULT ''"},
+					{"mail_rules", "filter_attachment_filename_exclude", "TEXT DEFAULT ''"},
+					{"mail_rules", "maximum_age", "INTEGER DEFAULT 30"},
+					{"mail_rules", "action", "INTEGER DEFAULT 1"},
+					{"mail_rules", "action_parameter", "TEXT DEFAULT ''"},
+					{"mail_rules", "assign_title_from", "INTEGER DEFAULT 1"},
+					{"mail_rules", "assign_tags_json", "TEXT DEFAULT '[]'"},
+					{"mail_rules", "assign_correspondent_from", "INTEGER DEFAULT 1"},
+					{"mail_rules", "assign_correspondent_id", "INTEGER"},
+					{"mail_rules", "assign_document_type_id", "INTEGER"},
+					{"mail_rules", "assign_owner_from_rule", "BOOLEAN DEFAULT 1"},
+					{"mail_rules", "order_num", "INTEGER DEFAULT 0"},
+					{"mail_rules", "attachment_type", "INTEGER DEFAULT 1"},
+					{"mail_rules", "consumption_scope", "INTEGER DEFAULT 1"},
+					{"mail_rules", "pdf_layout", "INTEGER DEFAULT 1"},
+					{"mail_rules", "stop_processing", "BOOLEAN DEFAULT 0"},
+					{"mail_rules", "owner_id", "INTEGER"},
+
+					// processed_mail
+					{"processed_mail", "rule_id", "INTEGER"},
+					{"processed_mail", "folder", "TEXT NOT NULL DEFAULT 'INBOX'"},
+					{"processed_mail", "uid", "TEXT NOT NULL DEFAULT ''"},
+					{"processed_mail", "subject", "TEXT DEFAULT ''"},
+					{"processed_mail", "received", "DATETIME DEFAULT CURRENT_TIMESTAMP"},
+					{"processed_mail", "processed", "DATETIME DEFAULT CURRENT_TIMESTAMP"},
+					{"processed_mail", "status", "TEXT DEFAULT 'SUCCESS'"},
+					{"processed_mail", "error", "TEXT DEFAULT ''"},
+					{"processed_mail", "owner_id", "INTEGER"},
+				}
+
+				for _, col := range mailColumns {
+					if err := addColumnIfNotExists(db, col.table, col.column, col.def); err != nil {
+						return fmt.Errorf("migration 7 error adding %s.%s: %w", col.table, col.column, err)
+					}
+				}
+
+				// Data migration for older databases where mail_accounts had 'server' and 'port' instead of 'imap_server' and 'imap_port'
+				_, _ = db.Exec("UPDATE mail_accounts SET imap_server = server WHERE (imap_server IS NULL OR imap_server = '') AND server IS NOT NULL")
+				_, _ = db.Exec("UPDATE mail_accounts SET imap_port = port WHERE (imap_port IS NULL OR imap_port = 0) AND port IS NOT NULL")
+
+				return nil
+			},
+		},
 	}
 
 	for _, m := range migrations {

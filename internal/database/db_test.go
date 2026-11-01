@@ -136,8 +136,8 @@ func TestVersionedMigrations(t *testing.T) {
 		t.Fatalf("GetAppliedMigrations failed: %v", err)
 	}
 
-	if len(records) < 4 {
-		t.Fatalf("expected at least 4 applied migrations, got %d", len(records))
+	if len(records) < 7 {
+		t.Fatalf("expected at least 7 applied migrations, got %d", len(records))
 	}
 
 	if records[0].Version != 1 || records[0].Name != "0001_initial_schema" {
@@ -151,6 +151,88 @@ func TestVersionedMigrations(t *testing.T) {
 	}
 	if records[3].Version != 4 || records[3].Name != "0004_search_indexes_and_fts_sync" {
 		t.Errorf("unexpected migration 4: %+v", records[3])
+	}
+	if records[6].Version != 7 || records[6].Name != "0007_mail_schema_parity_and_columns" {
+		t.Errorf("unexpected migration 7: %+v", records[6])
+	}
+}
+
+func TestMigration7_LegacyMailRulesUpgrade(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "legacy_mail.db")
+
+	// Step 1: Create an older database table structure simulating older paperless-go
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("failed creating raw db: %v", err)
+	}
+	_, err = rawDB.Exec(`
+		CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT, applied_at DATETIME);
+		INSERT INTO schema_migrations (version, name) VALUES (1, '0001_initial_schema');
+		INSERT INTO schema_migrations (version, name) VALUES (2, '0002_backward_compat_columns');
+		INSERT INTO schema_migrations (version, name) VALUES (3, '0003_tasks_persistence_and_retries');
+		INSERT INTO schema_migrations (version, name) VALUES (4, '0004_search_indexes_and_fts_sync');
+		INSERT INTO schema_migrations (version, name) VALUES (5, '0005_vault_envelope_encryption_and_rotation');
+		INSERT INTO schema_migrations (version, name) VALUES (6, '0006_network_scanners');
+
+		CREATE TABLE mail_accounts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			server TEXT NOT NULL,
+			port INTEGER DEFAULT 993,
+			username TEXT NOT NULL,
+			password TEXT NOT NULL
+		);
+
+		CREATE TABLE mail_rules (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			account_id INTEGER REFERENCES mail_accounts(id) ON DELETE CASCADE,
+			order_num INTEGER DEFAULT 0
+		);
+
+		INSERT INTO mail_accounts (id, name, server, port, username, password)
+		VALUES (1, 'Legacy Account', 'imap.legacy.com', 993, 'legacy@test.com', 'pass123');
+
+		INSERT INTO mail_rules (id, name, account_id, order_num)
+		VALUES (1, 'Legacy Invoices Rule', 1, 0);
+	`)
+	if err != nil {
+		t.Fatalf("failed populating legacy db: %v", err)
+	}
+	_ = rawDB.Close()
+
+	// Step 2: Open with database.Open, which runs migrations (including 0007)
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("database.Open failed on legacy database: %v", err)
+	}
+	defer db.Close()
+
+	// Step 3: Verify SELECT with 'enabled' and all other columns now works without 'no such column' error!
+	var enabled bool
+	var folder string
+	var orderNum int
+	err = db.QueryRow("SELECT enabled, folder, order_num FROM mail_rules WHERE id = 1").Scan(&enabled, &folder, &orderNum)
+	if err != nil {
+		t.Fatalf("SELECT enabled from upgraded mail_rules failed: %v", err)
+	}
+	if !enabled {
+		t.Errorf("expected enabled default to be true (1), got %v", enabled)
+	}
+	if folder != "INBOX" {
+		t.Errorf("expected default folder 'INBOX', got %q", folder)
+	}
+
+	// Verify mail_accounts had imap_server and imap_port migrated from server/port
+	var imapServer string
+	var imapPort int
+	err = db.QueryRow("SELECT imap_server, imap_port FROM mail_accounts WHERE id = 1").Scan(&imapServer, &imapPort)
+	if err != nil {
+		t.Fatalf("SELECT imap_server from upgraded mail_accounts failed: %v", err)
+	}
+	if imapServer != "imap.legacy.com" || imapPort != 993 {
+		t.Errorf("expected imapServer='imap.legacy.com' and imapPort=993, got %q, %d", imapServer, imapPort)
 	}
 }
 
